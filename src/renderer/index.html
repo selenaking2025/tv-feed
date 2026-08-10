@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; media-src 'self' blob: https:; connect-src 'self' blob: https:; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>TV Feed</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#player-region">跳到播放器</a>
+
+    <div class="app-shell" id="app-shell">
+      <header class="titlebar">
+        <div class="brand" aria-label="TV Feed">
+          <span class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </span>
+          <span class="brand-copy">
+            <strong>TV Feed</strong>
+            <small>IPTV 播放器与频道阅读器</small>
+          </span>
+        </div>
+
+        <div class="titlebar-actions">
+          <span class="catalog-state" id="catalog-state">正在整理频道…</span>
+          <button class="icon-button" id="sidebar-toggle" type="button" aria-label="打开频道目录" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+          </button>
+          <button class="icon-button" id="refresh-catalog" type="button" aria-label="更新频道目录" title="更新频道目录">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M18.2 9A7 7 0 0 0 6.4 6.4L4 9m16 6-2.4 2.6A7 7 0 0 1 5.8 15" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="channel-pane" id="channel-pane" aria-label="频道目录">
+          <div class="pane-heading">
+            <div>
+              <p class="eyebrow">CHANNEL GUIDE</p>
+              <h1>现在看什么？</h1>
+            </div>
+            <button class="icon-button pane-close" id="sidebar-close" type="button" aria-label="关闭频道目录">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+            </button>
+          </div>
+
+          <div class="search-box">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg>
+            <label class="sr-only" for="channel-search">搜索频道</label>
+            <input id="channel-search" type="search" placeholder="频道、国家或分类…" autocomplete="off" aria-label="搜索频道" />
+            <kbd aria-hidden="true">/</kbd>
+          </div>
+
+          <div class="view-tabs" aria-label="频道范围">
+            <button type="button" data-view="all" aria-pressed="true">全部</button>
+            <button type="button" data-view="chinese" aria-pressed="false">中文</button>
+            <button type="button" data-view="favorites" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z" /></svg>
+              收藏
+            </button>
+            <button type="button" data-view="recent" aria-pressed="false">最近</button>
+          </div>
+
+          <div class="facet-row">
+            <label>
+              <span>地区</span>
+              <select id="country-filter"><option value="">所有地区</option></select>
+            </label>
+            <label>
+              <span>类型</span>
+              <select id="category-filter"><option value="">所有类型</option></select>
+            </label>
+          </div>
+
+          <div class="list-summary">
+            <span id="result-count">准备频道目录</span>
+            <span class="keyboard-hint" aria-hidden="true">J / K 换台</span>
+          </div>
+
+          <div class="channel-list" id="channel-list" role="list" aria-label="频道列表" tabindex="-1">
+            <div class="channel-spacer" id="channel-spacer" aria-hidden="true"></div>
+            <div class="channel-window" id="channel-window"></div>
+            <div class="loading-list" id="loading-list" aria-hidden="true">
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+          </div>
+
+          <footer class="pane-footer">
+            <span class="safety-badge">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 7 3v5c0 4.6-2.8 8-7 10-4.2-2-7-5.4-7-10V6Z" /><path d="m9 12 2 2 4-5" /></svg>
+              按上游标记过滤
+            </span>
+            <button type="button" id="catalog-info">数据说明</button>
+          </footer>
+        </aside>
+
+        <div class="drawer-scrim" id="drawer-scrim" aria-hidden="true"></div>
+
+        <section class="player-pane" id="player-region" tabindex="-1" aria-labelledby="channel-title">
+          <div class="ambient-glow" aria-hidden="true"></div>
+
+          <div class="player-stage" id="player-stage">
+            <video id="video-player" playsinline preload="metadata"></video>
+
+            <div class="player-empty" id="player-empty">
+              <div class="signal-orbit" aria-hidden="true">
+                <span class="orbit orbit-one"></span>
+                <span class="orbit orbit-two"></span>
+                <span class="screen-glyph">
+                  <svg viewBox="0 0 64 64"><rect x="11" y="16" width="42" height="31" rx="5" /><path d="m23 55 4-8h10l4 8M25 28l7 4 7-4v9l-7 4-7-4Z" /></svg>
+                </span>
+              </div>
+              <p class="player-kicker">从左侧选择频道</p>
+              <strong>浏览频道，选择线路，在本机播放</strong>
+              <small>播放时你的设备会直接连接第三方源站；线路可用性会变化。</small>
+            </div>
+
+            <div class="player-status-overlay" id="player-status-overlay" hidden>
+              <span class="status-spinner" aria-hidden="true"></span>
+              <span id="player-status-text">正在连接…</span>
+            </div>
+
+            <div class="player-gradient" aria-hidden="true"></div>
+            <div class="now-playing" id="now-playing" hidden>
+              <span class="live-dot"></span>
+              <span>LIVE</span>
+              <span class="source-quality" id="source-quality"></span>
+            </div>
+
+            <div class="player-controls" aria-label="播放控制">
+              <div class="control-group">
+                <button class="round-control" id="previous-channel" type="button" aria-label="上一个频道" title="上一个频道（K）">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14M18 6l-8 6 8 6Z" /></svg>
+                </button>
+                <button class="primary-control" id="toggle-play" type="button" aria-label="播放" title="播放或暂停（空格）">
+                  <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z" /></svg>
+                  <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14" /></svg>
+                </button>
+                <button class="round-control" id="next-channel" type="button" aria-label="下一个频道" title="下一个频道（J）">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 5v14M6 6l8 6-8 6Z" /></svg>
+                </button>
+              </div>
+
+              <div class="control-group control-group-end">
+                <button class="round-control" id="stop-player" type="button" aria-label="停止播放" title="停止播放">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1" /></svg>
+                </button>
+                <button class="round-control" id="picture-in-picture" type="button" aria-label="画中画" title="画中画（P）">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" /><rect x="12" y="11" width="6" height="5" rx="1" /></svg>
+                </button>
+                <button class="round-control" id="fullscreen-player" type="button" aria-label="全屏" title="全屏（F）">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" /></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="channel-detail">
+            <div class="channel-identity">
+              <div class="detail-logo" id="detail-logo" aria-hidden="true">TV</div>
+              <div>
+                <p class="detail-meta" id="channel-meta">频道目录 · 等待选择</p>
+                <h2 id="channel-title">选择一个频道开始观看</h2>
+                <p class="detail-description" id="channel-description">目录依据上游元数据保守过滤；误标或内容变化仍可能造成遗漏。</p>
+              </div>
+            </div>
+            <button class="favorite-button" id="favorite-channel" type="button" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z" /></svg>
+              <span>收藏</span>
+            </button>
+          </div>
+
+          <section class="source-section" aria-labelledby="source-heading">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">SIGNAL SOURCES</p>
+                <h3 id="source-heading">播放线路</h3>
+              </div>
+              <p id="source-help">选台后会显示候选线路；失败时自动尝试下一条。</p>
+            </div>
+            <div class="source-list" id="source-list">
+              <span class="source-placeholder">尚未选择频道</span>
+            </div>
+          </section>
+
+          <section class="shortcut-strip" aria-label="键盘快捷键">
+            <span><kbd>/</kbd> 搜索</span>
+            <span><kbd>J</kbd><kbd>K</kbd> 换台</span>
+            <span><kbd>Space</kbd> 播放 / 暂停</span>
+            <span><kbd>P</kbd> 画中画</span>
+            <span><kbd>F</kbd> 全屏</span>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="info-dialog" id="info-dialog" aria-labelledby="info-title">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">ABOUT THE CATALOG</p>
+          <h2 id="info-title">数据说明</h2>
+        </div>
+        <button class="icon-button" id="dialog-close" type="button" aria-label="关闭数据说明">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+        </button>
+      </div>
+      <div class="dialog-copy">
+        <p>TV Feed 是本地运行的 IPTV 播放器和频道阅读器。频道元数据与直播 URL 索引来自 iptv-org；播放时由你的设备直接连接第三方源站。项目不托管、代理、录制或重新分发电视内容。</p>
+        <dl id="catalog-stats"></dl>
+        <p class="dialog-note">过滤策略：只保留上游明确标记为非成人、未停播、未列入 blocklist，并可由浏览器直接请求的 HTTPS HLS 线路。该规则依赖上游元数据，不识别直播画面；误标、内容变化或源站替换仍可能造成遗漏。</p>
+        <section class="privacy-controls" aria-labelledby="privacy-controls-title">
+          <div class="privacy-heading">
+            <h3 id="privacy-controls-title">本地与网络设置</h3>
+            <p>远程台标默认关闭；播放直播仍会直接连接第三方源站。</p>
+          </div>
+          <label class="privacy-toggle" for="remote-logo-toggle">
+            <span>
+              <strong>显示远程台标</strong>
+              <small id="remote-logo-help">开启后，台标主机会收到由本机发出的图片请求。</small>
+            </span>
+            <input id="remote-logo-toggle" type="checkbox" aria-describedby="remote-logo-help" />
+          </label>
+          <div class="privacy-actions">
+            <button id="clear-catalog-cache" type="button">清除目录缓存</button>
+            <button id="clear-viewing-data" type="button">清除收藏与观看记录</button>
+          </div>
+          <p class="privacy-status" id="privacy-control-status" role="status" aria-live="polite"></p>
+        </section>
+      </div>
+      <form method="dialog"><button class="dialog-primary" type="submit">知道了</button></form>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

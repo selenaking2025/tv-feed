@@ -1,0 +1,81 @@
+name: 权利移除申请
+description: 申请移除或更正频道、直播链接、Logo、名称或商标信息
+title: "[Rights removal]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你帮助我们准确处理权利问题。此 Issue 及附件将公开显示。
+
+        **不要上传身份证件、合同、授权书、私人 Stream Token、住址、电话号码或其他非公开资料。**
+        如果需要非公开证明，请先提交最少的公开信息，等待维护者确认私下沟通渠道。
+
+        安全漏洞不要使用本模板，请按照 `SECURITY.md` 私下报告。
+
+  - type: dropdown
+    id: request_type
+    attributes:
+      label: 申请类型
+      options:
+        - 移除整个频道
+        - 移除或屏蔽直播链接
+        - 移除或更正 Logo
+        - 更正频道名称或商标信息
+        - 其他权利问题
+    validations:
+      required: true
+
+  - type: input
+    id: channel_id
+    attributes:
+      label: iptv-org 频道 ID
+      description: 如果能够确认，请提供目录中的稳定频道 ID；不要填写登录凭据或 Token。
+      placeholder: ExampleTV.us
+    validations:
+      required: false
+
+  - type: textarea
+    id: public_urls
+    attributes:
+      label: 涉及的公开 URL
+      description: 提供 TV Feed 中涉及的直播 URL、Logo URL、官方频道页面或域名。请先删除查询参数中的私人 Token。
+      placeholder: 每行一个公开 URL，并简要说明其用途。
+    validations:
+      required: true
+
+  - type: textarea
+    id: relationship
+    attributes:
+      label: 你与相关权利的关系
+      description: 只需公开、概括地说明；不要上传身份或授权证明文件。
+      placeholder: 例如：频道运营方、商标权利人、受权代表。
+    validations:
+      required: true
+
+  - type: textarea
+    id: public_basis
+    attributes:
+      label: 可公开核验的权利依据
+      description: 可提供官网联系人页面、公开商标记录或其他公开资料；不要包含私人文件。
+    validations:
+      required: true
+
+  - type: textarea
+    id: requested_action
+    attributes:
+      label: 希望采取的操作
+      description: 请明确需要移除、屏蔽或更正的对象，以及是否存在需要优先临时屏蔽的紧急原因。
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我确认本申请基于善意，并且上述公开信息在我所知范围内准确。
+          required: true
+        - label: 我确认没有在本 Issue 中提供身份证件、合同、私人 Token 或其他非公开个人资料。
+          required: true

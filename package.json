@@ -1,0 +1,75 @@
+{
+  "name": "tv-feed",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "description": "Open-source local IPTV player and channel reader that connects directly to third-party sources.",
+  "productName": "TV Feed",
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
+    "build": "npm run typecheck && npm run test && electron-vite build",
+    "preview": "electron-vite preview",
+    "smoke": "node scripts/smoke-electron.mjs",
+    "pack:mac": "npm run build && electron-builder --mac dir --arm64 --publish never",
+    "dist:mac": "npm run build && electron-builder --mac dmg --arm64 --publish never"
+  },
+  "dependencies": {
+    "hls.js": "1.6.17"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "electron": "43.3.0",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "plist": "3.1.0",
+    "typescript": "7.0.2",
+    "vite": "7.3.6"
+  },
+  "build": {
+    "appId": "ai.tvfeed.desktop",
+    "productName": "TV Feed",
+    "electronDist": "node_modules/electron/dist",
+    "afterPack": "scripts/after-pack.cjs",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "LICENSE",
+        "to": "legal/LICENSE"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "legal/THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "third_party_licenses",
+        "to": "legal/third_party_licenses"
+      },
+      {
+        "from": "node_modules/electron/dist/LICENSES.chromium.html",
+        "to": "legal/ELECTRON-THIRD-PARTY-NOTICES.html"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "darkModeSupport": true,
+      "icon": "build/icon.icns",
+      "identity": null,
+      "target": [
+        "dir"
+      ]
+    },
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+out/
+release/
+.DS_Store
+*.log
+coverage/
+.vite/
