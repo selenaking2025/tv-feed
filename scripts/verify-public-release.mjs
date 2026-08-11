@@ -128,10 +128,10 @@ export function findGitReleaseStateViolations(root) {
     const tracking = git(root, ['rev-parse', 'origin/main']).trim()
     if (head !== tracking) violations.push('Git: 本地 HEAD 与 origin/main 跟踪引用不一致')
 
-    const remoteMain = git(root, ['ls-remote', '--exit-code', 'origin', 'refs/heads/main']).trim().split(/\s+/)[0] ?? ''
+    const remoteMain = gitRemote(root, ['ls-remote', '--exit-code', 'origin', 'refs/heads/main']).trim().split(/\s+/)[0] ?? ''
     if (!remoteMain || head !== remoteMain) violations.push('Git: 远端 main 与本地审计提交不一致')
 
-    const remoteHead = git(root, ['ls-remote', '--symref', 'origin', 'HEAD'])
+    const remoteHead = gitRemote(root, ['ls-remote', '--symref', 'origin', 'HEAD'])
     if (!/^ref:\s+refs\/heads\/main\s+HEAD$/m.test(remoteHead)) violations.push('GitHub: 远端默认分支必须是 main')
   } catch (error) {
     violations.push(`Git: 无法完成远端一致性检查（${error instanceof Error ? error.message : String(error)}）`)
@@ -198,6 +198,18 @@ function normalizeMarkdownTarget(value) {
 
 function git(root, args) {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+}
+
+function gitRemote(root, args) {
+  let lastError
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return git(root, args)
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError
 }
 
 function runRuntimeChecks(root) {
