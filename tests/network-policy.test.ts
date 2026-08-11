@@ -9,7 +9,9 @@ import {
   fetchBoundedHttps,
   formatConnectAuthority,
   gunzipBounded,
+  parseSystemProxyRules,
   readBoundedBody,
+  toSecureNetworkError,
   type AddressResolver,
   type PinnedRequestExecutor,
   type RawHttpsResponse
@@ -21,6 +23,39 @@ const FETCH_OPTIONS = {
   maxBytes: 64,
   timeoutMs: 1_000
 } as const
+
+test('macOS 代理规则只接受 DIRECT、PROXY 和 HTTPS 并保留回退顺序', () => {
+  const routes = parseSystemProxyRules('PROXY 127.0.0.1:8080; HTTPS proxy.example.com:8443; DIRECT')
+  assert.deepEqual(routes.map((route) => ({
+    kind: route.kind,
+    protocol: route.proxy?.protocol ?? '',
+    hostname: route.proxy?.hostname ?? '',
+    port: route.proxy?.port ?? ''
+  })), [
+    { kind: 'proxy', protocol: 'http:', hostname: '127.0.0.1', port: '8080' },
+    { kind: 'proxy', protocol: 'https:', hostname: 'proxy.example.com', port: '8443' },
+    { kind: 'direct', protocol: '', hostname: '', port: '' }
+  ])
+  assert.throws(() => parseSystemProxyRules('SOCKS5 127.0.0.1:1080'), /没有返回 DIRECT、PROXY 或 HTTPS/)
+  assert.throws(() => parseSystemProxyRules('PROXY proxy.example.com/path'), /路径或端口/)
+})
+
+test('TLS 建立前的连接重置仍按临时网络故障重试，证书错误保持不可重试', () => {
+  const reset = Object.assign(
+    new Error('Client network socket disconnected before secure TLS connection was established'),
+    { code: 'ECONNRESET' }
+  )
+  const resetFailure = toSecureNetworkError(reset)
+  assert.equal(resetFailure.code, 'network')
+  assert.equal(resetFailure.retryable, true)
+
+  const certificateFailure = Object.assign(new Error('certificate has expired'), {
+    code: 'CERT_HAS_EXPIRED'
+  })
+  const certificate = toSecureNetworkError(certificateFailure)
+  assert.equal(certificate.code, 'security')
+  assert.equal(certificate.retryable, false)
+})
 
 test('公网地址判定拒绝 IPv4 映射 IPv6、链路本地和保留地址', () => {
   assert.equal(isPublicIpAddress('8.8.8.8'), true)

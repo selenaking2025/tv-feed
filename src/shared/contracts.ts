@@ -103,6 +103,7 @@ export interface CatalogStats {
   excludedBlockedChannel: number
   excludedBrowserIncompatible: number
   excludedFamilySafety?: number
+  discardedUpstreamRecords?: number
 }
 
 export interface Catalog {
@@ -123,6 +124,46 @@ export interface CatalogLoadResult {
   warning: string
 }
 
+export type CatalogSyncStage =
+  | 'checking-cache'
+  | 'connecting'
+  | 'core-data'
+  | 'metadata'
+  | 'processing'
+  | 'writing-cache'
+  | 'verifying-cache'
+
+export interface CatalogSyncProgress {
+  stage: CatalogSyncStage
+  message: string
+  attempt?: number
+  maxAttempts?: number
+}
+
+export type CatalogFailureCode =
+  | 'proxy'
+  | 'dns'
+  | 'timeout'
+  | 'http'
+  | 'security'
+  | 'safety-data'
+  | 'invalid-data'
+  | 'cache-write'
+  | 'network'
+  | 'unknown'
+
+export interface CatalogLoadFailure {
+  code: CatalogFailureCode
+  title: string
+  message: string
+  detail: string
+  retryable: boolean
+}
+
+export type CatalogLoadResponse =
+  | { ok: true; result: CatalogLoadResult }
+  | { ok: false; failure: CatalogLoadFailure }
+
 export type RemoteResourceKind = 'hls-playlist' | 'hls-json' | 'hls-binary' | 'logo'
 
 export interface RemoteResourceRequest {
@@ -142,10 +183,14 @@ export interface RemoteResourceResponse {
 
 export interface TvFeedBridge {
   platform: NodeJS.Platform
-  loadCatalog(forceRefresh?: boolean, familySafety?: boolean): Promise<CatalogLoadResult>
+  loadCatalog(forceRefresh?: boolean, familySafety?: boolean): Promise<CatalogLoadResponse>
+  loadOfflineDemo(familySafety?: boolean): Promise<CatalogLoadResult>
+  onCatalogSyncProgress(listener: (progress: CatalogSyncProgress) => void): () => void
   clearCatalogCache(): Promise<boolean>
   fetchRemoteResource(request: RemoteResourceRequest): Promise<RemoteResourceResponse>
   cancelRemoteResource(requestId: string): void
   getAppVersion(): Promise<string>
+  setPlayerFullscreen(fullscreen: boolean): Promise<boolean>
+  onPlayerFullscreenChange(listener: (fullscreen: boolean) => void): () => void
   signalRendererReady(): void
 }

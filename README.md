@@ -20,7 +20,9 @@ TV Feed 与 iptv-org、电视台、频道及内容权利人没有隶属、赞助
 - 基于上游 NSFW 标记、分类和 blocklist 的保守内容过滤
 - 可选家庭安全模式：关闭远程台标、清除旧缓存与最近观看，并只显示本地批准频道 ID
 - 筛除停播、未知、被屏蔽和浏览器不兼容的目录条目
-- 本地目录缓存和内置离线样例
+- 首次启动没有缓存时实时同步 iptv-org，原子写入并复读验证本机目录缓存
+- 在线同步失败时显示错误类别、重试和诊断入口；不会自动用虚构样例冒充真实目录
+- 内置离线演示仅在用户主动选择后打开，并始终明确标记为 8 个虚构样例
 - 远程频道 Logo 默认关闭，可由用户主动开启
 - 在应用内清除目录缓存、收藏和观看记录
 
@@ -62,6 +64,18 @@ TVFEED_SMOKE_OUTPUT="$PWD/docs/assets/tv-feed-offline-sample.png" npm run smoke
 
 ```bash
 TVFEED_SMOKE_LIVE=1 npm run smoke
+```
+
+若要让两次正式包验收复用同一个隔离目录（首次在线同步、第二次从缓存启动），可传入一个预先创建的空目录：
+
+```bash
+TVFEED_SMOKE_LIVE=1 TVFEED_SMOKE_USER_DATA_ROOT="/absolute/path/to/empty-user-data" npm run smoke
+```
+
+模拟首次联网失败时，验收要求界面显示重试、诊断和“打开离线演示”按钮，且不得生成缓存或自动出现样例频道：
+
+```bash
+TVFEED_SMOKE_LIVE=1 TVFEED_SMOKE_FORCE_NETWORK_FAILURE=1 TVFEED_SMOKE_EXPECT_CATALOG_FAILURE=1 npm run smoke
 ```
 
 也可以把本机已有的目录缓存复制到隔离的临时验收目录中，避免为了 UI 回归测试重复连接 iptv-org；缓存仍会经过应用当前的大小、结构、denylist 和有效期校验，且不会提交到仓库：

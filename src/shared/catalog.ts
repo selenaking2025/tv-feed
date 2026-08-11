@@ -4,12 +4,11 @@ import type {
   CatalogChannel,
   CatalogCountry,
   CatalogSource,
-  UpstreamBundle,
   UpstreamChannel,
   UpstreamLogo,
   UpstreamStream
 } from './contracts.ts'
-import { assertBoundedUpstreamBundle, CATALOG_LIMITS } from './catalog-limits.ts'
+import { CATALOG_LIMITS, sanitizeUpstreamBundle } from './catalog-limits.ts'
 import { FAMILY_APPROVED_CHANNEL_IDS } from './family-safety.ts'
 import { PROJECT_DENIED_CHANNEL_IDS } from './project-denylist.ts'
 import { normalizeRemoteHlsUrl, normalizeRemoteHttpsUrl } from './remote-url-policy.ts'
@@ -17,11 +16,12 @@ import { normalizeRemoteHlsUrl, normalizeRemoteHttpsUrl } from './remote-url-pol
 const FORBIDDEN_CATEGORY_IDS = new Set(['xxx'])
 
 export function transformIptvData(
-  bundle: UpstreamBundle,
+  input: unknown,
   generatedAt = new Date().toISOString(),
   projectDeniedChannelIds: ReadonlySet<string> = PROJECT_DENIED_CHANNEL_IDS
 ): Catalog {
-  assertBoundedUpstreamBundle(bundle)
+  const sanitized = sanitizeUpstreamBundle(input)
+  const bundle = sanitized.bundle
   if (generatedAt.length > 64 || !Number.isFinite(Date.parse(generatedAt))) throw new Error('目录生成时间无效')
   const countryMap = new Map(bundle.countries.map((country) => [country.code, country]))
   const categoryMap = new Map(bundle.categories.map((category) => [category.id, category]))
@@ -135,7 +135,8 @@ export function transformIptvData(
       excludedUnknownChannel,
       excludedUnsafeChannel,
       excludedBlockedChannel,
-      excludedBrowserIncompatible
+      excludedBrowserIncompatible,
+      discardedUpstreamRecords: Object.values(sanitized.discardedRecords).reduce((total, count) => total + count, 0)
     }
   }
 }

@@ -68,6 +68,40 @@ test('缓存正文超过读取预算时在 JSON.parse 前被拒绝', () => {
   assert.equal(parseCatalogCache(oversized), undefined)
 })
 
+test('旧版缓存重新规范化安全 URL 后保留全部频道和线路', () => {
+  const legacy = transformedCatalog()
+  const channel = legacy.channels[0]!
+  const originalChannelCount = legacy.channels.length
+  const originalSourceCount = legacy.channels.reduce((total, item) => total + item.sources.length, 0)
+  channel.logoUrl += '#legacy-logo'
+  channel.website += '#legacy-website'
+  channel.sources[0]!.url += '#legacy-stream'
+
+  assert.equal(isValidBoundedCatalog(legacy), false)
+  const parsed = parseCatalogCache(new TextEncoder().encode(JSON.stringify(legacy)))
+
+  assert.ok(parsed)
+  assert.equal(parsed.channels.length, originalChannelCount)
+  assert.equal(parsed.channels.reduce((total, item) => total + item.sources.length, 0), originalSourceCount)
+  assert.equal(parsed.channels[0]!.logoUrl, 'https://img.example.com/logo.png')
+  assert.equal(parsed.channels[0]!.website, 'https://station.example.com/watch')
+  assert.equal(parsed.channels[0]!.sources[0]!.url, 'https://media.example.com/live.m3u8')
+})
+
+test('旧版缓存迁移后仍拒绝不安全 URL 和损坏结构', () => {
+  const privateLogo = transformedCatalog()
+  privateLogo.channels[0]!.logoUrl = 'https://127.0.0.1/logo.png#legacy'
+  assert.equal(parseCatalogCache(new TextEncoder().encode(JSON.stringify(privateLogo))), undefined)
+
+  const insecureStream = transformedCatalog()
+  insecureStream.channels[0]!.sources[0]!.url = 'http://media.example.com/live.m3u8#legacy'
+  assert.equal(parseCatalogCache(new TextEncoder().encode(JSON.stringify(insecureStream))), undefined)
+
+  const malformedSources = transformedCatalog() as unknown as { channels: Array<{ sources: unknown }> }
+  malformedSources.channels[0]!.sources = { url: 'https://media.example.com/live.m3u8' }
+  assert.equal(parseCatalogCache(new TextEncoder().encode(JSON.stringify(malformedSources))), undefined)
+})
+
 function transformedCatalog(): Catalog {
   return transformIptvData(bundle(), '2026-08-10T00:00:00.000Z')
 }
@@ -79,7 +113,8 @@ function bundle(): UpstreamBundle {
       name: '安全频道',
       country: 'CN',
       categories: ['general'],
-      is_nsfw: false
+      is_nsfw: false,
+      website: 'https://station.example.com/watch'
     }],
     streams: [{ channel: 'safe.cn', url: 'https://media.example.com/live.m3u8', quality: '1080p' }],
     countries: [{ code: 'CN', name: '中国', flag: '🇨🇳' }],

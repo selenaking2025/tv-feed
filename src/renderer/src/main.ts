@@ -6,7 +6,15 @@ import {
   channelIndexForNumber,
   hasLongerChannelNumber
 } from '../../shared/channel-shortcuts.ts'
-import type { CacheStatus, Catalog, CatalogChannel, CatalogLoadResult, CatalogSource } from '../../shared/contracts.ts'
+import type {
+  CacheStatus,
+  Catalog,
+  CatalogChannel,
+  CatalogLoadFailure,
+  CatalogLoadResult,
+  CatalogSource,
+  CatalogSyncProgress
+} from '../../shared/contracts.ts'
 import { displayCountryName, getCountrySearchAliases, sortCountriesForDisplay } from '../../shared/countries.ts'
 import { hasVerifiedOfficialSource, isVerifiedOfficialSource } from '../../shared/official-sources.ts'
 import type { PlaybackDiagnostic } from '../../shared/playback-diagnostics.ts'
@@ -24,6 +32,7 @@ const FAMILY_SAFETY_KEY = 'tvfeed:family-safety:v1'
 const CHINESE_REGIONS = new Set(['CN', 'HK', 'TW', 'MO'])
 const MAX_CONCURRENT_LOGO_REQUESTS = 4
 const MAX_PENDING_LOGO_REQUESTS = 64
+const compactSidebarQuery = window.matchMedia('(max-width: 1040px)')
 
 const elements = {
   app: required<HTMLElement>('#app-shell'),
@@ -42,6 +51,13 @@ const elements = {
   channelSpacer: required<HTMLElement>('#channel-spacer'),
   channelWindow: required<HTMLElement>('#channel-window'),
   loadingList: required<HTMLElement>('#loading-list'),
+  catalogFailure: required<HTMLElement>('#catalog-failure'),
+  catalogFailureTitle: required<HTMLElement>('#catalog-failure-title'),
+  catalogFailureMessage: required<HTMLElement>('#catalog-failure-message'),
+  retryCatalog: required<HTMLButtonElement>('#retry-catalog'),
+  toggleCatalogDiagnostics: required<HTMLButtonElement>('#toggle-catalog-diagnostics'),
+  openOfflineDemo: required<HTMLButtonElement>('#open-offline-demo'),
+  catalogDiagnostics: required<HTMLElement>('#catalog-diagnostics'),
   video: required<HTMLVideoElement>('#video-player'),
   playerStage: required<HTMLElement>('#player-stage'),
   playerEmpty: required<HTMLElement>('#player-empty'),
@@ -88,6 +104,7 @@ let favorites = new Set(readStoredArray(FAVORITES_KEY))
 let recents = readStoredArray(RECENTS_KEY)
 let failedSources = new Set<string>()
 let refreshInProgress = false
+let catalogSyncActive = false
 let familySafetyEnabled = readStoredBoolean(FAMILY_SAFETY_KEY)
 let remoteLogosEnabled = !familySafetyEnabled && readStoredBoolean(REMOTE_LOGOS_KEY)
 let currentCacheStatus: CacheStatus = 'offline-sample'
@@ -96,6 +113,7 @@ let activeLogoRequests = 0
 let channelNumberBuffer = ''
 let channelNumberTimer: number | undefined
 let announcementTimer: number | undefined
+let fullscreenTransitionInProgress = false
 const logoQueue: Array<() => Promise<void>> = []
 const activeLogoRequestIds = new Set<string>()
 const activeLogoObjectUrls = new Set<string>()
@@ -109,13 +127,16 @@ bindEvents()
 void initialize()
 
 async function initialize(): Promise<void> {
+  catalogSyncActive = true
   try {
     if (familySafetyEnabled) enforceFamilyLocalState()
-    const result = await window.tvFeed.loadCatalog(false, familySafetyEnabled)
-    applyCatalog(result)
+    const response = await window.tvFeed.loadCatalog(false, familySafetyEnabled)
+    if (response.ok) applyCatalog(response.result)
+    else showCatalogFailure(response.failure)
   } catch (error) {
-    showCatalogFailure(error)
+    showCatalogFailure(unexpectedCatalogFailure(error))
   } finally {
+    catalogSyncActive = false
     elements.loadingList.hidden = true
     elements.app.dataset.appReady = 'true'
     window.tvFeed.signalRendererReady()
@@ -134,6 +155,10 @@ function bindEvents(): void {
   }
 
   elements.refreshCatalog.addEventListener('click', () => void refreshCatalog())
+  elements.retryCatalog.addEventListener('click', () => void refreshCatalog())
+  elements.toggleCatalogDiagnostics.addEventListener('click', toggleCatalogDiagnostics)
+  elements.openOfflineDemo.addEventListener('click', () => void openOfflineDemo())
+  window.tvFeed.onCatalogSyncProgress(updateCatalogProgress)
   elements.previous.addEventListener('click', () => moveChannel(-1))
   elements.next.addEventListener('click', () => moveChannel(1))
   elements.togglePlay.addEventListener('click', () => void togglePlayback())
@@ -141,10 +166,12 @@ function bindEvents(): void {
   elements.favorite.addEventListener('click', () => toggleFavorite(selectedChannelId))
   elements.pip.addEventListener('click', () => void togglePictureInPicture())
   elements.fullscreen.addEventListener('click', () => void toggleFullscreen())
+  window.tvFeed.onPlayerFullscreenChange(syncFullscreenControl)
 
   elements.sidebarToggle.addEventListener('click', openSidebar)
   elements.sidebarClose.addEventListener('click', closeSidebar)
   elements.drawerScrim.addEventListener('click', closeSidebar)
+  compactSidebarQuery.addEventListener('change', resetSidebarForViewport)
 
   elements.catalogInfo.addEventListener('click', () => elements.infoDialog.showModal())
   elements.dialogClose.addEventListener('click', () => elements.infoDialog.close())
@@ -159,10 +186,18 @@ function bindEvents(): void {
   document.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('resize', renderVirtualRows)
   new ResizeObserver(renderVirtualRows).observe(elements.channelList)
+  syncSidebarState()
+  syncFullscreenControl(false)
 }
 
 function applyCatalog(result: CatalogLoadResult): void {
+  catalogSyncActive = false
+  setCatalogFailureVisible(false)
+  setCatalogControlsEnabled(true)
+  elements.loadingList.hidden = true
   catalog = result.catalog
+  elements.app.dataset.catalogSource = result.catalog.source
+  elements.app.dataset.catalogCount = String(result.catalog.channels.length)
   populateFacets(result.catalog)
   renderCatalogStats(result.catalog)
   updateCatalogStatus(result.cacheStatus, result.catalog.channels.length)
@@ -188,17 +223,25 @@ async function refreshCatalog(): Promise<void> {
   if (refreshInProgress) return
   refreshInProgress = true
   elements.refreshCatalog.disabled = true
+  elements.retryCatalog.disabled = true
+  elements.openOfflineDemo.disabled = true
   syncSafetyControls()
-  elements.catalogState.textContent = '正在从 iptv-org 更新…'
+  beginCatalogSync('正在从 iptv-org 更新…')
   try {
-    const result = await window.tvFeed.loadCatalog(true, familySafetyEnabled)
-    applyCatalog(result)
-    showToast(result.cacheStatus === 'network' ? '频道目录已更新' : '已重新载入频道目录')
+    const response = await window.tvFeed.loadCatalog(true, familySafetyEnabled)
+    if (response.ok) {
+      applyCatalog(response.result)
+      showToast(response.result.cacheStatus === 'network' ? '频道目录已更新' : '已重新载入频道目录')
+    } else {
+      showCatalogFailure(response.failure)
+    }
   } catch (error) {
-    showToast(`更新失败：${errorMessage(error)}`, 6000)
+    showCatalogFailure(unexpectedCatalogFailure(error))
   } finally {
     refreshInProgress = false
     elements.refreshCatalog.disabled = false
+    elements.retryCatalog.disabled = false
+    elements.openOfflineDemo.disabled = false
     syncSafetyControls()
   }
 }
@@ -544,13 +587,18 @@ async function updateFamilySafetyPreference(): Promise<void> {
 
   elements.catalogState.textContent = familySafetyEnabled ? '正在加载家庭安全目录…' : '正在恢复完整目录…'
   try {
-    const result = await window.tvFeed.loadCatalog(familySafetyEnabled, familySafetyEnabled)
-    applyCatalog(result)
-    const message = familySafetyEnabled
-      ? `家庭安全模式已开启；仅显示本地允许列表。${cacheWarning}`
-      : '家庭安全模式已关闭；已恢复保守过滤后的目录。'
-    setPrivacyStatus(message)
-    showToast(familySafetyEnabled ? '家庭安全模式已开启' : '家庭安全模式已关闭')
+    const response = await window.tvFeed.loadCatalog(familySafetyEnabled, familySafetyEnabled)
+    if (response.ok) {
+      applyCatalog(response.result)
+      const message = familySafetyEnabled
+        ? `家庭安全模式已开启；仅显示本地允许列表。${cacheWarning}`
+        : '家庭安全模式已关闭；已恢复保守过滤后的目录。'
+      setPrivacyStatus(message)
+      showToast(familySafetyEnabled ? '家庭安全模式已开启' : '家庭安全模式已关闭')
+    } else {
+      showCatalogFailure(response.failure)
+      setPrivacyStatus(`${response.failure.title}。${cacheWarning}`)
+    }
   } catch (error) {
     const message = `切换家庭安全模式后目录加载失败：${errorMessage(error)}`
     setPrivacyStatus(`${message}${cacheWarning ? `；${cacheWarning}` : ''}`)
@@ -796,12 +844,28 @@ async function togglePictureInPicture(): Promise<void> {
 }
 
 async function toggleFullscreen(): Promise<void> {
+  if (fullscreenTransitionInProgress) return
+  const requested = !elements.app.classList.contains('player-fullscreen')
+  fullscreenTransitionInProgress = true
+  elements.fullscreen.disabled = true
   try {
-    if (document.fullscreenElement) await document.exitFullscreen()
-    else await elements.playerStage.requestFullscreen()
+    if (requested) elements.app.classList.remove('sidebar-open')
+    const fullscreen = await window.tvFeed.setPlayerFullscreen(requested)
+    syncFullscreenControl(fullscreen)
+    if (fullscreen !== requested) showToast(requested ? '系统未能进入全屏' : '系统未能退出全屏')
   } catch (error) {
-    showToast(`无法进入全屏：${errorMessage(error)}`)
+    showToast(`无法切换全屏：${errorMessage(error)}`)
+  } finally {
+    fullscreenTransitionInProgress = false
+    elements.fullscreen.disabled = false
   }
+}
+
+function syncFullscreenControl(fullscreen: boolean): void {
+  elements.app.classList.toggle('player-fullscreen', fullscreen)
+  elements.fullscreen.classList.toggle('is-fullscreen', fullscreen)
+  elements.fullscreen.setAttribute('aria-label', fullscreen ? '退出全屏' : '全屏')
+  elements.fullscreen.title = fullscreen ? '退出全屏（F 或 Esc）' : '全屏（F）'
 }
 
 function handleGlobalKeydown(event: KeyboardEvent): void {
@@ -809,7 +873,10 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
   const isEditing = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement || target?.isContentEditable
 
   if (event.key === 'Escape') {
-    closeSidebar()
+    if (elements.app.classList.contains('player-fullscreen')) {
+      event.preventDefault()
+      void toggleFullscreen()
+    } else if (compactSidebarQuery.matches && elements.app.classList.contains('sidebar-open')) closeSidebar()
     return
   }
   if (elements.infoDialog.open) return
@@ -875,18 +942,41 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
 }
 
 function openSidebar(): void {
-  elements.app.classList.add('sidebar-open')
-  elements.sidebarToggle.setAttribute('aria-expanded', 'true')
+  if (compactSidebarQuery.matches) elements.app.classList.add('sidebar-open')
+  else elements.app.classList.remove('sidebar-collapsed')
+  syncSidebarState()
   requestAnimationFrame(() => elements.search.focus())
 }
 
 function closeSidebar(): void {
-  elements.app.classList.remove('sidebar-open')
-  elements.sidebarToggle.setAttribute('aria-expanded', 'false')
+  if (compactSidebarQuery.matches) elements.app.classList.remove('sidebar-open')
+  else elements.app.classList.add('sidebar-collapsed')
+  syncSidebarState()
+  if (elements.channelPane.contains(document.activeElement)) requestAnimationFrame(() => elements.sidebarToggle.focus())
+}
+
+function resetSidebarForViewport(): void {
+  elements.app.classList.remove('sidebar-open', 'sidebar-collapsed')
+  syncSidebarState()
+  renderVirtualRows()
+}
+
+function syncSidebarState(): void {
+  const compact = compactSidebarQuery.matches
+  const visible = compact
+    ? elements.app.classList.contains('sidebar-open')
+    : !elements.app.classList.contains('sidebar-collapsed')
+  elements.sidebarToggle.setAttribute('aria-expanded', String(visible))
+  elements.sidebarToggle.setAttribute('aria-label', compact ? '打开频道目录' : '显示频道目录')
+  elements.sidebarToggle.title = compact ? '打开频道目录' : '显示频道目录'
+  elements.sidebarClose.setAttribute('aria-label', compact ? '关闭频道目录' : '隐藏频道目录')
+  elements.sidebarClose.title = compact ? '关闭频道目录' : '隐藏频道目录'
+  elements.channelPane.inert = !visible
 }
 
 function updateCatalogStatus(status: CacheStatus, count: number): void {
   currentCacheStatus = status
+  delete elements.catalogState.dataset.syncStage
   const labels: Record<CacheStatus, string> = {
     network: `已同步 iptv-org · ${formatCount(count)} 台`,
     'fresh-cache': `本机目录 · ${formatCount(count)} 台`,
@@ -906,6 +996,7 @@ function renderCatalogStats(value: Catalog): void {
     ['按标记排除成人 / 停播', formatCount(value.stats.excludedUnsafeChannel)],
     ['排除屏蔽频道', formatCount(value.stats.excludedBlockedChannel)],
     ['排除不兼容线路', formatCount(value.stats.excludedBrowserIncompatible)],
+    ['跳过异常上游记录', formatCount(value.stats.discardedUpstreamRecords ?? 0)],
     ['家庭允许列表排除线路', formatCount(value.stats.excludedFamilySafety ?? 0)],
     ['目录生成时间', new Date(value.generatedAt).toLocaleString('zh-CN')]
   ]
@@ -920,15 +1011,106 @@ function renderCatalogStats(value: Catalog): void {
   elements.catalogStats.replaceChildren(fragment)
 }
 
-function showCatalogFailure(error: unknown): void {
-  elements.catalogState.textContent = '目录加载失败'
+function showCatalogFailure(failure: CatalogLoadFailure): void {
+  catalogSyncActive = false
+  catalog = undefined
+  delete elements.app.dataset.catalogSource
+  delete elements.app.dataset.catalogCount
+  filteredChannels = []
+  player.stop()
+  elements.loadingList.hidden = true
+  elements.channelWindow.replaceChildren()
+  elements.channelWindow.hidden = true
+  elements.channelSpacer.hidden = true
+  setCatalogControlsEnabled(false)
+  setCatalogFailureVisible(true)
+  elements.catalogFailure.dataset.errorCode = failure.code
+  elements.catalogFailureTitle.textContent = failure.title
+  elements.catalogFailureMessage.textContent = failure.message
+  elements.catalogDiagnostics.textContent = [
+    `错误类别：${failure.code}`,
+    `可重试：${failure.retryable ? '是' : '否'}`,
+    `诊断：${failure.detail || '没有更多诊断信息'}`
+  ].join('\n')
+  elements.catalogDiagnostics.hidden = true
+  elements.toggleCatalogDiagnostics.setAttribute('aria-expanded', 'false')
+  elements.toggleCatalogDiagnostics.textContent = '查看诊断信息'
+  elements.catalogState.textContent = '无法获取 iptv-org 目录'
   elements.catalogState.classList.add('warning')
-  elements.resultCount.textContent = '无法载入频道'
-  const empty = document.createElement('div')
-  empty.className = 'empty-list'
-  empty.textContent = `频道目录加载失败：${errorMessage(error)}`
-  elements.channelWindow.replaceChildren(empty)
-  showToast('频道目录加载失败，请点击右上角更新按钮重试', 7000)
+  elements.resultCount.textContent = '未载入真实频道'
+  showToast(`${failure.title}，可以重新尝试或主动打开离线演示`, 7000)
+}
+
+function beginCatalogSync(message: string): void {
+  catalogSyncActive = true
+  setCatalogFailureVisible(false)
+  elements.catalogState.classList.remove('warning')
+  elements.catalogState.textContent = message
+  if (!catalog) {
+    elements.channelWindow.hidden = true
+    elements.channelSpacer.hidden = true
+    elements.loadingList.hidden = false
+    elements.resultCount.textContent = message
+  }
+}
+
+function updateCatalogProgress(progress: CatalogSyncProgress): void {
+  if (!catalogSyncActive) return
+  elements.catalogState.dataset.syncStage = progress.stage
+  elements.catalogState.textContent = progress.message
+  if (!catalog) elements.resultCount.textContent = progress.message
+}
+
+function setCatalogFailureVisible(visible: boolean): void {
+  elements.catalogFailure.hidden = !visible
+  if (!visible) delete elements.catalogFailure.dataset.errorCode
+  elements.channelWindow.hidden = visible
+  elements.channelSpacer.hidden = visible
+}
+
+function setCatalogControlsEnabled(enabled: boolean): void {
+  elements.search.disabled = !enabled
+  elements.country.disabled = !enabled
+  elements.category.disabled = !enabled
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')) button.disabled = !enabled
+}
+
+function toggleCatalogDiagnostics(): void {
+  const expanded = elements.toggleCatalogDiagnostics.getAttribute('aria-expanded') === 'true'
+  elements.toggleCatalogDiagnostics.setAttribute('aria-expanded', String(!expanded))
+  elements.toggleCatalogDiagnostics.textContent = expanded ? '查看诊断信息' : '隐藏诊断信息'
+  elements.catalogDiagnostics.hidden = expanded
+}
+
+async function openOfflineDemo(): Promise<void> {
+  if (refreshInProgress) return
+  refreshInProgress = true
+  elements.retryCatalog.disabled = true
+  elements.openOfflineDemo.disabled = true
+  elements.refreshCatalog.disabled = true
+  beginCatalogSync('正在打开离线演示…')
+  try {
+    const result = await window.tvFeed.loadOfflineDemo(familySafetyEnabled)
+    applyCatalog(result)
+    showToast('已打开离线演示；这些是虚构样例，不是 iptv-org 真实频道')
+  } catch (error) {
+    showCatalogFailure(unexpectedCatalogFailure(error))
+  } finally {
+    refreshInProgress = false
+    elements.retryCatalog.disabled = false
+    elements.openOfflineDemo.disabled = false
+    elements.refreshCatalog.disabled = false
+  }
+}
+
+function unexpectedCatalogFailure(error: unknown): CatalogLoadFailure {
+  return {
+    code: 'unknown',
+    title: '频道目录加载失败',
+    message: '应用没有收到可用的频道目录结果，请重新尝试。',
+    detail: errorMessage(error),
+    retryable: true
+  }
 }
 
 function getChannel(channelId: string): CatalogChannel | undefined {

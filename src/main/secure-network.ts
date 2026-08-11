@@ -1,6 +1,6 @@
 import { lookup as dnsLookup } from 'node:dns/promises'
-import { request as httpRequest, type IncomingHttpHeaders } from 'node:http'
-import { request as httpsRequest } from 'node:https'
+import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http'
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { isIP, type LookupFunction } from 'node:net'
 import { checkServerIdentity, connect as tlsConnect, type TLSSocket } from 'node:tls'
 import { gunzip } from 'node:zlib'
@@ -60,7 +60,48 @@ interface SecureFetchDependencies {
   request?: PinnedRequestExecutor
 }
 
+export type SecureNetworkFailureCode = 'proxy' | 'dns' | 'timeout' | 'http' | 'security' | 'network'
+
+export class SecureNetworkError extends Error {
+  readonly code: SecureNetworkFailureCode
+  readonly retryable: boolean
+  readonly statusCode: number | undefined
+
+  constructor(
+    code: SecureNetworkFailureCode,
+    message: string,
+    retryable: boolean,
+    options: { cause?: unknown; statusCode?: number } = {}
+  ) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause })
+    this.name = 'SecureNetworkError'
+    this.code = code
+    this.retryable = retryable
+    this.statusCode = options.statusCode
+  }
+}
+
+export interface ProxyRoute {
+  kind: 'direct' | 'proxy'
+  proxy?: URL
+}
+
+export type SystemProxyResolver = (url: string) => Promise<string>
+
+let systemProxyResolver: SystemProxyResolver | undefined
+
+// The catalog API host is a fixed application endpoint rather than
+// user-controlled media metadata. Some macOS/PAC proxies route by hostname and
+// do not support CONNECT to a pre-resolved IP. We still require a public DNS
+// result first and retain TLS hostname verification. Every arbitrary remote
+// resource continues to use the pinned-IP CONNECT path.
+const VERIFIED_HOSTNAME_PROXY_TARGETS = new Set(['iptv-org.github.io'])
+
 const DEFAULT_MAX_REDIRECTS = 5
+
+export function configureSystemProxyResolver(resolver: SystemProxyResolver | undefined): void {
+  systemProxyResolver = resolver
+}
 
 export async function fetchBoundedHttps(
   inputUrl: string,
@@ -82,6 +123,7 @@ export async function fetchBoundedHttps(
       const headers: Record<string, string> = {
         Accept: options.accept,
         'Accept-Encoding': options.allowCompression === true && options.rangeStart === undefined ? 'gzip' : 'identity',
+        Connection: 'close',
         'User-Agent': 'TV-Feed/0.1'
       }
       if (options.rangeStart !== undefined && options.rangeEnd !== undefined) {
@@ -108,7 +150,12 @@ export async function fetchBoundedHttps(
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         response.destroy()
-        throw new Error(`远程服务器返回 HTTP ${response.statusCode}`)
+        throw new SecureNetworkError(
+          'http',
+          `远程服务器返回 HTTP ${response.statusCode}`,
+          response.statusCode === 429 || response.statusCode >= 500,
+          { statusCode: response.statusCode }
+        )
       }
       const contentEncoding = firstHeader(response.headers['content-encoding'])?.trim().toLocaleLowerCase()
       if (contentEncoding && contentEncoding !== 'identity' && contentEncoding !== 'gzip') {
@@ -136,9 +183,13 @@ export async function fetchBoundedHttps(
     throw new Error('远程请求重定向处理失败')
   } catch (error) {
     if (deadline.signal.aborted) {
-      throw deadline.signal.reason instanceof Error ? deadline.signal.reason : new Error('远程请求已取消')
+      const reason = deadline.signal.reason instanceof Error ? deadline.signal.reason : new Error('远程请求已取消')
+      if (reason.message.includes('总时间上限')) {
+        throw new SecureNetworkError('timeout', reason.message, true, { cause: reason })
+      }
+      throw toSecureNetworkError(reason)
     }
-    throw error
+    throw toSecureNetworkError(error)
   } finally {
     deadline.dispose()
   }
@@ -264,12 +315,20 @@ async function openPinnedHttpsRequest(
   target: ResolvedRemoteTarget,
   options: PinnedRequestOptions
 ): Promise<RawHttpsResponse> {
-  const proxy = configuredHttpsProxy()
-  if (proxy) {
-    const socket = await createProxyTlsTunnel(proxy, target, options)
-    return issueHttpsRequest(target, options, socket)
+  const routes = await resolveProxyRoutes(target.url, options.signal)
+  let lastProxyError: unknown
+  for (const route of routes) {
+    if (route.kind === 'direct') return issueHttpsRequest(target, options)
+    if (!route.proxy) continue
+    try {
+      const socket = await createProxyTlsTunnel(route.proxy, target, options)
+      return issueHttpsRequest(target, options, socket)
+    } catch (error) {
+      lastProxyError = error
+    }
   }
-  return issueHttpsRequest(target, options)
+  const failure = toSecureNetworkError(lastProxyError ?? new Error('代理没有提供可用路由'))
+  throw new SecureNetworkError('proxy', `代理连接失败：${failure.message}`, failure.retryable, { cause: failure })
 }
 
 function issueHttpsRequest(
@@ -278,24 +337,37 @@ function issueHttpsRequest(
   socket?: TLSSocket
 ): Promise<RawHttpsResponse> {
   return new Promise((resolve, reject) => {
+    const tunnelAgent = socket ? new HttpsAgent({ keepAlive: false }) : undefined
+    if (tunnelAgent && socket) {
+      tunnelAgent.createConnection = ((
+        _options: unknown,
+        callback?: (error: Error | null, connectedSocket: TLSSocket) => void
+      ): TLSSocket => {
+        callback?.(null, socket)
+        return socket
+      }) as typeof tunnelAgent.createConnection
+    }
     const request = httpsRequest(target.url, {
       method: 'GET',
       headers: options.headers,
-      agent: false,
-      ...(socket
-        ? { createConnection: () => socket }
-        : { lookup: createPinnedLookup(target.hostname, target.addresses) }),
+      agent: tunnelAgent ?? false,
+      ...(socket ? {} : { lookup: createPinnedLookup(target.hostname, target.addresses) }),
       ...(options.signal ? { signal: options.signal } : {})
-    }, (response) => {
+    }, onResponse)
+
+    function onResponse(response: IncomingMessage): void {
       resolve({
         statusCode: response.statusCode ?? 0,
         headers: response.headers,
         body: response,
         destroy: (error?: Error) => response.destroy(error)
       })
-    })
+    }
     request.setTimeout(options.timeoutMs, () => request.destroy(new Error('远程请求超时')))
-    request.once('error', reject)
+    request.once('error', (error) => {
+      tunnelAgent?.destroy()
+      reject(error)
+    })
     request.end()
   })
 }
@@ -312,7 +384,9 @@ function createProxyTlsTunnel(
       return
     }
     const targetPort = target.url.port ? Number(target.url.port) : 443
-    const authority = formatConnectAuthority(address.address, targetPort)
+    const authority = VERIFIED_HOSTNAME_PROXY_TARGETS.has(canonicalHostname(target.hostname))
+      ? `${canonicalHostname(target.hostname)}:${targetPort}`
+      : formatConnectAuthority(address.address, targetPort)
     const headers: Record<string, string> = {
       Host: authority,
       'User-Agent': 'TV-Feed/0.1'
@@ -379,6 +453,65 @@ function configuredHttpsProxy(): URL | undefined {
   return proxy
 }
 
+async function resolveProxyRoutes(targetUrl: URL, signal?: AbortSignal): Promise<ProxyRoute[]> {
+  const environmentProxy = configuredHttpsProxy()
+  if (environmentProxy) return [{ kind: 'proxy', proxy: environmentProxy }]
+  if (!systemProxyResolver) return [{ kind: 'direct' }]
+
+  let rules: string
+  try {
+    const resolution = systemProxyResolver(targetUrl.toString())
+    rules = signal ? await abortable(resolution, signal) : await resolution
+  } catch (error) {
+    throw new SecureNetworkError('proxy', '无法解析 macOS 系统代理配置', true, { cause: error })
+  }
+  return parseSystemProxyRules(rules)
+}
+
+export function parseSystemProxyRules(input: string): ProxyRoute[] {
+  const routes: ProxyRoute[] = []
+  const seen = new Set<string>()
+  for (const rawDirective of input.split(';')) {
+    const directive = rawDirective.trim()
+    if (!directive) continue
+    if (directive.toLocaleUpperCase() === 'DIRECT') {
+      if (!seen.has('direct')) {
+        seen.add('direct')
+        routes.push({ kind: 'direct' })
+      }
+      continue
+    }
+
+    const match = directive.match(/^(PROXY|HTTPS)\s+(.+)$/i)
+    if (!match?.[1] || !match[2]) continue
+    const scheme = match[1].toLocaleUpperCase() === 'HTTPS' ? 'https:' : 'http:'
+    let proxy: URL
+    try {
+      proxy = new URL(`${scheme}//${match[2]}`)
+    } catch {
+      throw new SecureNetworkError('proxy', 'macOS 系统代理返回了无效地址', false)
+    }
+    if (
+      !proxy.hostname ||
+      !proxy.port ||
+      (proxy.pathname && proxy.pathname !== '/') ||
+      proxy.search ||
+      proxy.hash
+    ) {
+      throw new SecureNetworkError('proxy', 'macOS 系统代理包含不受支持的路径或端口', false)
+    }
+    const key = proxy.toString()
+    if (!seen.has(key)) {
+      seen.add(key)
+      routes.push({ kind: 'proxy', proxy })
+    }
+  }
+  if (routes.length === 0) {
+    throw new SecureNetworkError('proxy', 'macOS 系统代理没有返回 DIRECT、PROXY 或 HTTPS 路由', false)
+  }
+  return routes
+}
+
 function decodeUrlComponent(value: string): string {
   try {
     return decodeURIComponent(value)
@@ -420,6 +553,34 @@ function parseContentLength(value: string | undefined): number | undefined {
 
 function normalizeContentType(value: string): string {
   return value.split(';', 1)[0]?.trim().toLocaleLowerCase() ?? ''
+}
+
+export function toSecureNetworkError(error: unknown): SecureNetworkError {
+  if (error instanceof SecureNetworkError) return error
+  const source = error instanceof Error ? error : new Error(String(error))
+  const message = source.message || '远程网络请求失败'
+  const nodeCode = 'code' in source && typeof source.code === 'string' ? source.code : ''
+
+  if (message.includes('超时') || message.includes('总时间上限') || nodeCode === 'ETIMEDOUT') {
+    return new SecureNetworkError('timeout', message, true, { cause: source })
+  }
+  if (nodeCode === 'EAI_AGAIN') return new SecureNetworkError('dns', message, true, { cause: source })
+  if (nodeCode === 'ENOTFOUND' || nodeCode === 'ENODATA') {
+    return new SecureNetworkError('dns', message, false, { cause: source })
+  }
+  if (/代理|proxy/i.test(message)) return new SecureNetworkError('proxy', message, true, { cause: source })
+  // A proxy or origin can reset a socket before the TLS handshake finishes.
+  // Node includes "TLS" in that transient message, so classify concrete
+  // transport errno values before the certificate/TLS security wording.
+  if (['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ENETDOWN', 'ENETUNREACH', 'EHOSTUNREACH'].includes(nodeCode)) {
+    return new SecureNetworkError('network', message, true, { cause: source })
+  }
+  if (
+    /非公网|无凭据的公网|证书|certificate|TLS|重定向|安全上限|内容编码|gzip|字节范围/i.test(message)
+  ) {
+    return new SecureNetworkError('security', message, false, { cause: source })
+  }
+  return new SecureNetworkError('network', message, false, { cause: source })
 }
 
 function canonicalHostname(value: string): string {

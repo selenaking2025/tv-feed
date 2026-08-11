@@ -4,6 +4,7 @@ import { applyFamilySafetyAllowlist, applyProjectDenylist, isExplicitlySafeChann
 import { displayCountryName, getCountrySearchAliases, sortCountriesForDisplay } from '../src/shared/countries.ts'
 import { FAMILY_APPROVED_CHANNELS, FAMILY_APPROVED_CHANNEL_IDS, familyApprovalHasIndependentOfficialReview } from '../src/shared/family-safety.ts'
 import { createHlsAcceptanceCatalog, createOfflineSampleCatalog } from '../src/shared/sample-catalog.ts'
+import { CATALOG_LIMITS } from '../src/shared/catalog-limits.ts'
 import type { UpstreamBundle, UpstreamChannel } from '../src/shared/contracts.ts'
 
 function channel(id: string, overrides: Partial<UpstreamChannel> = {}): UpstreamChannel {
@@ -73,6 +74,46 @@ test('只保留符合上游元数据规则、未屏蔽且浏览器兼容的 HTTP
   assert.equal(catalog.stats.excludedBlockedChannel, 2)
   assert.equal(catalog.stats.excludedUnknownChannel, 1)
   assert.equal(catalog.stats.excludedBrowserIncompatible, 4)
+})
+
+test('上游个别坏记录只清除对应字段或线路，不会击穿整个真实目录', () => {
+  const input = {
+    channels: [
+      channel('safe.cn', {
+        name: '仍应保留的频道',
+        website: 'https://station.example.com/watch#upstream-fragment',
+        network: 'x'.repeat(CATALOG_LIMITS.maxMetadataLength + 1)
+      }),
+      { id: 42, name: null, country: 'CN' }
+    ],
+    streams: [
+      { channel: 'safe.cn', url: 'https://media.example.com/primary.m3u8#fragment' },
+      { channel: 'safe.cn', url: 'https://media.example.com/backup.m3u8', label: 'x'.repeat(CATALOG_LIMITS.maxMetadataLength + 1) },
+      { channel: 'safe.cn', url: 'http://media.example.com/insecure.m3u8' },
+      { channel: 'safe.cn', url: 'https://127.0.0.1/private.m3u8' },
+      { channel: {}, url: 7 }
+    ],
+    countries: [{ code: 'CN', name: '中国', flag: '🇨🇳' }],
+    categories: [{ id: 'general', name: '综合' }],
+    logos: [{ channel: 'safe.cn', in_use: true, url: 'https://127.0.0.1/private-logo.png' }],
+    blocklist: [{ reason: 'dmca' }]
+  }
+
+  const catalog = transformIptvData(input, '2026-08-10T00:00:00.000Z')
+  const retained = catalog.channels[0]
+
+  assert.equal(catalog.channels.length, 1)
+  assert.equal(retained?.id, 'safe.cn')
+  assert.equal(retained?.website, 'https://station.example.com/watch')
+  assert.equal(retained?.network, '')
+  assert.equal(retained?.logoUrl, '')
+  assert.deepEqual(retained?.sources.map((source) => source.url).sort(), [
+    'https://media.example.com/backup.m3u8',
+    'https://media.example.com/primary.m3u8'
+  ])
+  assert.equal(retained?.sources[0]?.label, '')
+  assert.equal(catalog.stats.excludedBrowserIncompatible, 2)
+  assert.ok((catalog.stats.discardedUpstreamRecords ?? 0) >= 3)
 })
 
 test('频道必须被上游显式标记为非成人，并排除缺失标记、停播与成人分类', () => {

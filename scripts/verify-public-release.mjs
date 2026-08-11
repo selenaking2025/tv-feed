@@ -214,7 +214,7 @@ function gitRemote(root, args) {
 
 function runRuntimeChecks(root) {
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-  const environment = { ...process.env, TVFEED_OFFLINE_DEMO: '1' }
+  const environment = { ...process.env }
   for (const key of Object.keys(environment)) {
     if (key.startsWith('TVFEED_SMOKE_') || key === 'TVFEED_ELECTRON_PATH' || key === 'TVFEED_EXPECT_PACKAGED') delete environment[key]
   }

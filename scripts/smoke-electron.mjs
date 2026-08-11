@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { rmSync } from 'node:fs'
-import { copyFile, mkdtemp, readFile, stat, unlink } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, stat, unlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -15,11 +15,17 @@ const diagnosticRequested = process.env.TVFEED_SMOKE_DIAGNOSTIC === '1'
 const familySafetyRequested = process.env.TVFEED_SMOKE_FAMILY === '1'
 const forcedNetworkFailure = process.env.TVFEED_SMOKE_FORCE_NETWORK_FAILURE === '1'
 const expectedPackaged = process.env.TVFEED_EXPECT_PACKAGED === '1'
-const smokeUserDataPath = await mkdtemp(join(tmpdir(), 'tv-feed-smoke-user-data-'))
+const expectedCatalogFailure = process.env.TVFEED_SMOKE_EXPECT_CATALOG_FAILURE === '1'
+const offlineDemoTransitionRequested = process.env.TVFEED_SMOKE_OPEN_OFFLINE_DEMO === '1'
+const suppliedUserDataPath = process.env.TVFEED_SMOKE_USER_DATA_ROOT
+const smokeUserDataPath = suppliedUserDataPath
+  ? resolve(suppliedUserDataPath)
+  : await mkdtemp(join(tmpdir(), 'tv-feed-smoke-user-data-'))
+if (suppliedUserDataPath) await mkdir(smokeUserDataPath, { recursive: true })
 const packagedStdoutPath = join(tmpdir(), `tv-feed-smoke-${process.pid}.stdout`)
 const packagedStderrPath = join(tmpdir(), `tv-feed-smoke-${process.pid}.stderr`)
 process.once('exit', () => {
-  rmSync(smokeUserDataPath, { recursive: true, force: true })
+  if (!suppliedUserDataPath) rmSync(smokeUserDataPath, { recursive: true, force: true })
   rmSync(packagedStdoutPath, { force: true })
   rmSync(packagedStderrPath, { force: true })
 })
@@ -35,7 +41,7 @@ if (process.env.TVFEED_SMOKE_CATALOG_CACHE) {
 
 const childEnvironment = {
   ...process.env,
-  TVFEED_OFFLINE_DEMO: liveCatalog ? '0' : '1',
+  TVFEED_SMOKE_OFFLINE_DEMO: liveCatalog ? '0' : '1',
   TVFEED_SMOKE_OUTPUT: screenshotPath,
   TVFEED_SMOKE_USER_DATA: smokeUserDataPath
 }
@@ -108,11 +114,48 @@ if (!checks.ready || !checks.bridge || !checks.hasVideo) throw new Error(`应用
 if (!checks.directExternalFetchBlocked || /(?:img|media|connect)-src[^;]*https:/i.test(checks.csp || '')) {
   throw new Error(`渲染器外部直连策略未生效：${JSON.stringify({ blocked: checks.directExternalFetchBlocked, csp: checks.csp })}`)
 }
+if (expectedCatalogFailure) {
+  if (
+    !checks.catalogFailureVisible ||
+    !checks.retryCatalogVisible ||
+    !checks.offlineDemoVisible ||
+    !checks.diagnosticsVisible ||
+    checks.sampleNamesPresent ||
+    checks.catalogSource ||
+    checks.rows !== 0 ||
+    !checks.catalogState?.startsWith('无法获取 iptv-org')
+  ) {
+    throw new Error(`联网失败界面没有明确阻断样例兜底：${JSON.stringify(checks)}`)
+  }
+  if (offlineDemoTransitionRequested && !checks.offlineDemoTransitionCheck?.passed) {
+    throw new Error(`用户主动打开离线演示的状态转换未通过：${JSON.stringify(checks.offlineDemoTransitionCheck)}`)
+  }
+  if (expectedPackaged && (!checks.packaged || checks.appName !== 'TV Feed' || checks.executableName !== 'TV Feed')) {
+    throw new Error(`未运行预期的打包应用：${JSON.stringify({ packaged: checks.packaged, appName: checks.appName, executableName: checks.executableName })}`)
+  }
+  const failureScreenshot = await stat(screenshotPath)
+  if (failureScreenshot.size < 50_000) throw new Error(`失败态验收截图异常小：${failureScreenshot.size} bytes`)
+  const failureCacheExists = await stat(join(smokeUserDataPath, 'catalog-v1.json')).then(() => true, () => false)
+  if (failureCacheExists) throw new Error('联网失败验收意外生成了频道缓存')
+  process.stdout.write(`Electron 联网失败态验收通过：${screenshotPath}（${failureScreenshot.size} bytes）\n`)
+  process.exit(0)
+}
 if (checks.rows < 8 || checks.visibleChannelNames < 8 || checks.sourceButtons < 1 || !checks.selectedChannel) {
   throw new Error(`频道界面未完整渲染：${JSON.stringify(checks)}`)
 }
 if (!checks.favoriteToggleWorks || !checks.searchFilterWorks) {
   throw new Error(`核心交互未通过：${JSON.stringify(checks)}`)
+}
+if (!checks.controlsBelowPlayer || !checks.sidebarCollapseWorks || !checks.sidebarRestoreWorks) {
+  throw new Error(`播放器布局或侧栏折叠未通过：${JSON.stringify({
+    controlsBelowPlayer: checks.controlsBelowPlayer,
+    sidebarCollapseWorks: checks.sidebarCollapseWorks,
+    sidebarRestoreWorks: checks.sidebarRestoreWorks,
+    playerExpansion: checks.playerExpansion
+  })}`)
+}
+if (!checks.fullscreenCheck?.passed) {
+  throw new Error(`播放器全屏未通过：${JSON.stringify(checks.fullscreenCheck)}`)
 }
 if (
   !checks.sourceTitlesHideUrls ||
@@ -155,8 +198,8 @@ if (
 if (!playbackRequested && !diagnosticRequested && checks.noAutoplay !== true) {
   throw new Error(`首次启动发生了自动播放：${JSON.stringify({ noAutoplay: checks.noAutoplay })}`)
 }
-if (forcedNetworkFailure && !checks.catalogState?.startsWith('离线样例')) {
-  throw new Error(`网络失败时未回退到离线样例：${JSON.stringify({ catalogState: checks.catalogState })}`)
+if (forcedNetworkFailure && checks.catalogState?.startsWith('离线样例')) {
+  throw new Error(`网络失败时不应自动回退到离线样例：${JSON.stringify({ catalogState: checks.catalogState })}`)
 }
 if (expectedPackaged && (!checks.packaged || checks.appName !== 'TV Feed' || checks.executableName !== 'TV Feed')) {
   throw new Error(`未运行预期的打包应用：${JSON.stringify({ packaged: checks.packaged, appName: checks.appName, executableName: checks.executableName })}`)
@@ -176,8 +219,26 @@ const screenshot = await stat(screenshotPath)
 if (screenshot.size < 50_000) throw new Error(`验收截图异常小：${screenshot.size} bytes`)
 
 const cacheExists = await stat(join(smokeUserDataPath, 'catalog-v1.json')).then(() => true, () => false)
-if ((!liveCatalog || forcedNetworkFailure) && cacheExists) {
-  throw new Error('离线或网络失败验收意外生成了频道缓存')
+if (!liveCatalog && cacheExists) {
+  throw new Error('离线演示验收意外生成了频道缓存')
+}
+if (liveCatalog && !cacheExists) {
+  throw new Error('真实目录验收没有生成或保留 catalog-v1.json')
+}
+if (liveCatalog) {
+  const cached = JSON.parse(await readFile(join(smokeUserDataPath, 'catalog-v1.json'), 'utf8'))
+  const cachedChannels = Array.isArray(cached.channels) ? cached.channels.length : 0
+  const cachedSources = Array.isArray(cached.channels)
+    ? cached.channels.reduce((total, channel) => total + (Array.isArray(channel?.sources) ? channel.sources.length : 0), 0)
+    : 0
+  if (
+    cached.source !== 'iptv-org' ||
+    cachedChannels <= 8 ||
+    checks.catalogSource !== 'iptv-org' ||
+    checks.catalogCount !== cachedChannels
+  ) {
+    throw new Error(`真实目录与缓存复读结果不一致：${JSON.stringify({ cachedSource: cached.source, cachedChannels, cachedSources, uiSource: checks.catalogSource, uiCount: checks.catalogCount })}`)
+  }
 }
 
 process.stdout.write(`Electron 验收通过：${screenshotPath}（${screenshot.size} bytes）\n`)

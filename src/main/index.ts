@@ -2,8 +2,9 @@ import { app, BrowserWindow, ipcMain, protocol, session } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { clearCatalogCache, loadCatalog } from './catalog-service.ts'
+import { clearCatalogCache, loadCatalog, loadOfflineDemo, toCatalogLoadFailure } from './catalog-service.ts'
 import { fetchRemoteResource, validateRemoteResourceRequest } from './remote-resource-service.ts'
+import { configureSystemProxyResolver } from './secure-network.ts'
 
 const APP_SCHEME = 'tvfeed'
 const APP_HOST = 'app'
@@ -37,6 +38,7 @@ if (process.env.TVFEED_SMOKE_PLAY === '1') {
 
 app.whenReady().then(async () => {
   await registerAppProtocol()
+  configureSystemProxyResolver((url) => session.defaultSession.resolveProxy(url))
   hardenSession()
   registerIpc()
   createMainWindow()
@@ -81,6 +83,13 @@ function createMainWindow(): void {
   const rendererId = mainWindow.webContents.id
   mainWindow.webContents.once('destroyed', () => abortRemoteFetches(rendererId))
   mainWindow.once('ready-to-show', () => mainWindow?.show())
+  const createdWindow = mainWindow
+  mainWindow.on('enter-full-screen', () => {
+    if (!createdWindow.isDestroyed()) createdWindow.webContents.send('player-fullscreen:changed', true)
+  })
+  mainWindow.on('leave-full-screen', () => {
+    if (!createdWindow.isDestroyed()) createdWindow.webContents.send('player-fullscreen:changed', false)
+  })
   mainWindow.on('closed', () => {
     mainWindow = null
   })
@@ -126,9 +135,20 @@ function sanitizeDiagnostic(value: string): string {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('catalog:load', (event, forceRefresh: unknown, familySafety: unknown) => {
+  ipcMain.handle('catalog:load', async (event, forceRefresh: unknown, familySafety: unknown) => {
     assertTrustedSender(event.senderFrame?.url ?? '')
-    return loadCatalog(forceRefresh === true, familySafety === true)
+    try {
+      const result = await loadCatalog(forceRefresh === true, familySafety === true, (progress) => {
+        if (!event.sender.isDestroyed()) event.sender.send('catalog:progress', progress)
+      })
+      return { ok: true, result }
+    } catch (error) {
+      return { ok: false, failure: toCatalogLoadFailure(error) }
+    }
+  })
+  ipcMain.handle('catalog:offline-demo', (event, familySafety: unknown) => {
+    assertTrustedSender(event.senderFrame?.url ?? '')
+    return loadOfflineDemo(familySafety === true)
   })
   ipcMain.handle('catalog:clear-cache', (event) => {
     assertTrustedSender(event.senderFrame?.url ?? '')
@@ -161,6 +181,13 @@ function registerIpc(): void {
     assertTrustedSender(event.senderFrame?.url ?? '')
     return app.getVersion()
   })
+  ipcMain.handle('player-fullscreen:set', (event, fullscreen: unknown) => {
+    assertTrustedSender(event.senderFrame?.url ?? '')
+    if (typeof fullscreen !== 'boolean') throw new Error('全屏状态必须是布尔值')
+    const browserWindow = BrowserWindow.fromWebContents(event.sender)
+    if (!browserWindow || browserWindow.isDestroyed()) throw new Error('播放器窗口不可用')
+    return setBrowserWindowFullscreen(browserWindow, fullscreen)
+  })
   ipcMain.on('renderer:ready', (event) => {
     assertTrustedSender(event.senderFrame?.url ?? '')
     if (process.env.TVFEED_SMOKE_OUTPUT && !smokeHandled) {
@@ -168,6 +195,54 @@ function registerIpc(): void {
       void runSmokeInspection(event.sender)
     }
   })
+}
+
+function setBrowserWindowFullscreen(browserWindow: BrowserWindow, fullscreen: boolean): Promise<boolean> {
+  if (isBrowserWindowFullscreen(browserWindow) === fullscreen) return Promise.resolve(fullscreen)
+  if (process.platform === 'darwin') {
+    browserWindow.setSimpleFullScreen(fullscreen)
+    const result = browserWindow.isSimpleFullScreen()
+    browserWindow.webContents.send('player-fullscreen:changed', result)
+    return Promise.resolve(result)
+  }
+  return new Promise((resolvePromise, rejectPromise) => {
+    let settled = false
+    const removeTransitionListener = (): void => {
+      if (fullscreen) browserWindow.removeListener('enter-full-screen', onTransition)
+      else browserWindow.removeListener('leave-full-screen', onTransition)
+    }
+    const finish = (result: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      removeTransitionListener()
+      browserWindow.removeListener('closed', onClosed)
+      resolvePromise(result)
+    }
+    const fail = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      removeTransitionListener()
+      browserWindow.removeListener('closed', onClosed)
+      rejectPromise(error)
+    }
+    const onTransition = (): void => finish(fullscreen)
+    const onClosed = (): void => finish(false)
+    const timeout = setTimeout(() => finish(isBrowserWindowFullscreen(browserWindow)), 5_000)
+    if (fullscreen) browserWindow.once('enter-full-screen', onTransition)
+    else browserWindow.once('leave-full-screen', onTransition)
+    browserWindow.once('closed', onClosed)
+    try {
+      browserWindow.setFullScreen(fullscreen)
+    } catch (error) {
+      fail(error)
+    }
+  })
+}
+
+function isBrowserWindowFullscreen(browserWindow: BrowserWindow): boolean {
+  return process.platform === 'darwin' ? browserWindow.isSimpleFullScreen() : browserWindow.isFullScreen()
 }
 
 function hardenSession(): void {
@@ -312,6 +387,61 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
       const familySafetyToggle = document.querySelector('#family-safety-toggle')
       const infoDialog = document.querySelector('#info-dialog')
       const modalOpen = infoDialog instanceof HTMLDialogElement && infoDialog.open
+      const catalogFailure = document.querySelector('#catalog-failure')
+      const retryCatalog = document.querySelector('#retry-catalog')
+      const diagnosticsToggle = document.querySelector('#toggle-catalog-diagnostics')
+      const offlineDemo = document.querySelector('#open-offline-demo')
+      const diagnostics = document.querySelector('#catalog-diagnostics')
+      const catalogFailureVisible = catalogFailure instanceof HTMLElement && !catalogFailure.hidden
+      if (catalogFailureVisible && diagnosticsToggle instanceof HTMLButtonElement) diagnosticsToggle.click()
+      const diagnosticsVisible = diagnostics instanceof HTMLElement && !diagnostics.hidden && Boolean(diagnostics.textContent?.trim())
+      const playerStage = document.querySelector('#player-stage')
+      const playerSurface = document.querySelector('#player-surface')
+      const playerControls = document.querySelector('.player-controls')
+      const sidebarClose = document.querySelector('#sidebar-close')
+      const sidebarToggle = document.querySelector('#sidebar-toggle')
+      const channelPane = document.querySelector('#channel-pane')
+      const stageRect = playerStage?.getBoundingClientRect()
+      const controlsRect = playerControls?.getBoundingClientRect()
+      const controlsBelowPlayer = Boolean(
+        playerSurface &&
+        playerControls?.parentElement === playerSurface &&
+        stageRect &&
+        controlsRect &&
+        controlsRect.top >= stageRect.bottom &&
+        getComputedStyle(playerControls).position !== 'absolute'
+      )
+      let sidebarCollapseWorks = false
+      let sidebarRestoreWorks = false
+      let playerExpansion = 0
+      if (
+        app instanceof HTMLElement &&
+        playerStage instanceof HTMLElement &&
+        sidebarClose instanceof HTMLButtonElement &&
+        sidebarToggle instanceof HTMLButtonElement &&
+        channelPane instanceof HTMLElement &&
+        matchMedia('(min-width: 1041px)').matches
+      ) {
+        const initialPlayerWidth = playerStage.getBoundingClientRect().width
+        sidebarClose.click()
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        const collapsedPlayerWidth = playerStage.getBoundingClientRect().width
+        playerExpansion = Math.round(collapsedPlayerWidth - initialPlayerWidth)
+        sidebarCollapseWorks =
+          app.classList.contains('sidebar-collapsed') &&
+          getComputedStyle(channelPane).display === 'none' &&
+          getComputedStyle(sidebarToggle).display !== 'none' &&
+          sidebarToggle.getAttribute('aria-expanded') === 'false' &&
+          channelPane.inert &&
+          playerExpansion > 100
+        sidebarToggle.click()
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        sidebarRestoreWorks =
+          !app.classList.contains('sidebar-collapsed') &&
+          getComputedStyle(channelPane).display !== 'none' &&
+          sidebarToggle.getAttribute('aria-expanded') === 'true' &&
+          !channelPane.inert
+      }
       const focusOutlineVisible = [...document.styleSheets].some((sheet) =>
         [...sheet.cssRules].some((rule) => rule instanceof CSSStyleRule &&
           rule.selectorText.includes(':focus-visible') &&
@@ -369,6 +499,14 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         scripts: [...document.scripts].map((script) => script.src),
         catalogState: document.querySelector('#catalog-state')?.textContent ?? '',
         resultCount: document.querySelector('#result-count')?.textContent ?? '',
+        catalogSource: app instanceof HTMLElement ? app.dataset.catalogSource ?? '' : '',
+        catalogCount: app instanceof HTMLElement ? Number(app.dataset.catalogCount ?? 0) : 0,
+        catalogFailureVisible,
+        catalogFailureCode: catalogFailure instanceof HTMLElement ? catalogFailure.dataset.errorCode ?? '' : '',
+        retryCatalogVisible: retryCatalog instanceof HTMLButtonElement && !retryCatalog.hidden && !retryCatalog.disabled,
+        offlineDemoVisible: offlineDemo instanceof HTMLButtonElement && !offlineDemo.hidden && !offlineDemo.disabled,
+        diagnosticsVisible,
+        sampleNamesPresent: /TV Feed 综合样例|Demo News Japan|Demo Nature US/.test(document.body?.innerText ?? ''),
         rows: rows.length,
         visibleChannelNames,
         hasVideo: video instanceof HTMLVideoElement,
@@ -389,6 +527,10 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         searchFilterWorks,
         officialSourceMarkingCheck,
         gridColumns: layout ? getComputedStyle(layout).gridTemplateColumns : '',
+        controlsBelowPlayer,
+        sidebarCollapseWorks,
+        sidebarRestoreWorks,
+        playerExpansion,
         searchLabel: search?.getAttribute('aria-label') ?? '',
         resultCountAnnounced: resultCount?.getAttribute('role') === 'status' && resultCount?.getAttribute('aria-live') === 'polite',
         channelHealthAnnounced: channelHealth?.getAttribute('role') === 'status' && channelHealth?.getAttribute('aria-live') === 'polite',
@@ -400,10 +542,12 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         muteShortcutWorks,
         volumeShortcutWorks,
         modalShortcutIsolationWorks,
-        bridge: typeof window.tvFeed?.loadCatalog === 'function',
+        bridge: typeof window.tvFeed?.loadCatalog === 'function' && typeof window.tvFeed?.loadOfflineDemo === 'function',
         csp: document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute('content') ?? ''
       }
     })()`)
+    const offlineDemoTransitionCheck = await runOfflineDemoTransitionCheck(webContents)
+    const fullscreenCheck = await runFullscreenCheck(webContents)
     await webContents.executeJavaScript(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
     const image = await webContents.capturePage()
     const result = {
@@ -411,6 +555,8 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
       playbackCheck,
       familySafetyCheck,
       playbackDiagnosticCheck,
+      offlineDemoTransitionCheck,
+      fullscreenCheck,
       directExternalFetchBlocked: directExternalFetchBlocked === true,
       packaged: app.isPackaged,
       appName: app.getName(),
@@ -427,6 +573,151 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
   } finally {
     setTimeout(() => app.quit(), 100)
   }
+}
+
+async function runOfflineDemoTransitionCheck(webContents: Electron.WebContents): Promise<Record<string, unknown>> {
+  if (process.env.TVFEED_SMOKE_OPEN_OFFLINE_DEMO !== '1') return { attempted: false }
+  const before: unknown = await webContents.executeJavaScript(`(() => ({
+    failureVisible: document.querySelector('#catalog-failure') instanceof HTMLElement && !document.querySelector('#catalog-failure').hidden,
+    source: document.querySelector('#app-shell')?.dataset.catalogSource ?? '',
+    rows: document.querySelectorAll('[data-channel-row]').length
+  }))()`)
+  const clicked = await webContents.executeJavaScript(`(() => {
+    const button = document.querySelector('#open-offline-demo')
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return false
+    button.click()
+    return true
+  })()`)
+  let after: Record<string, unknown> = {}
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+    const snapshot: unknown = await webContents.executeJavaScript(`(() => ({
+      source: document.querySelector('#app-shell')?.dataset.catalogSource ?? '',
+      state: document.querySelector('#catalog-state')?.textContent ?? '',
+      rows: document.querySelectorAll('[data-channel-row]').length,
+      failureVisible: document.querySelector('#catalog-failure') instanceof HTMLElement && !document.querySelector('#catalog-failure').hidden
+    }))()`)
+    after = snapshot && typeof snapshot === 'object' ? snapshot as Record<string, unknown> : {}
+    if (after.source === 'offline-sample' && Number(after.rows) >= 8) break
+  }
+  const beforeState = before && typeof before === 'object' ? before as Record<string, unknown> : {}
+  return {
+    attempted: true,
+    clicked: clicked === true,
+    before: beforeState,
+    after,
+    passed:
+      beforeState.failureVisible === true &&
+      beforeState.source === '' &&
+      Number(beforeState.rows) === 0 &&
+      clicked === true &&
+      after.source === 'offline-sample' &&
+      String(after.state ?? '').startsWith('离线样例') &&
+      Number(after.rows) >= 8 &&
+      after.failureVisible === false
+  }
+}
+
+async function runFullscreenCheck(webContents: Electron.WebContents): Promise<Record<string, unknown>> {
+  const browserWindow = BrowserWindow.fromWebContents(webContents)
+  if (!browserWindow || browserWindow.isDestroyed()) {
+    return { attempted: false, passed: false, reason: 'missing-window' }
+  }
+
+  const capability: unknown = await webContents.executeJavaScript(`(() => {
+    const button = document.querySelector('#fullscreen-player')
+    return {
+      ready: button instanceof HTMLButtonElement,
+      bridge: typeof window.tvFeed?.setPlayerFullscreen === 'function'
+    }
+  })()`)
+  const canRun = capability && typeof capability === 'object' ? capability as Record<string, unknown> : {}
+  if (canRun.ready !== true || canRun.bridge !== true) {
+    return { attempted: false, passed: false, reason: canRun.ready === true ? 'missing-bridge' : 'missing-elements' }
+  }
+
+  const enterButtonClicked = await webContents.executeJavaScript(`(() => {
+    const button = document.querySelector('#fullscreen-player')
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return false
+    button.click()
+    return true
+  })()`)
+  const enteredNativeFullscreen = enterButtonClicked === true && await waitForWindowFullscreenState(browserWindow, true)
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
+  const enteredSnapshot: unknown = await webContents.executeJavaScript(`(() => {
+    const app = document.querySelector('#app-shell')
+    const controls = document.querySelector('.player-controls')
+    const button = document.querySelector('#fullscreen-player')
+    const surface = document.querySelector('#player-surface')
+    const channelPane = document.querySelector('#channel-pane')
+    const titlebar = document.querySelector('.titlebar')
+    return {
+      appFullscreenClass: app?.classList.contains('player-fullscreen') === true,
+      controlsVisible: controls instanceof HTMLElement && controls.getBoundingClientRect().height >= 40 && getComputedStyle(controls).display !== 'none',
+      exitLabelVisible: button?.getAttribute('aria-label') === '退出全屏' && button?.classList.contains('is-fullscreen'),
+      playerFillsViewport: surface instanceof HTMLElement && surface.getBoundingClientRect().width >= innerWidth - 2 && surface.getBoundingClientRect().height >= innerHeight - 2,
+      surroundingChromeHidden: channelPane instanceof HTMLElement && titlebar instanceof HTMLElement && getComputedStyle(channelPane).display === 'none' && getComputedStyle(titlebar).display === 'none'
+    }
+  })()`)
+  const entered = enteredSnapshot && typeof enteredSnapshot === 'object'
+    ? enteredSnapshot as Record<string, unknown>
+    : {}
+
+  const exitButtonClicked = enteredNativeFullscreen
+    ? await webContents.executeJavaScript(`(() => {
+        const button = document.querySelector('#fullscreen-player')
+        if (!(button instanceof HTMLButtonElement) || button.disabled) return false
+        button.click()
+        return true
+      })()`)
+    : false
+  const exitedNativeFullscreen = exitButtonClicked === true && await waitForWindowFullscreenState(browserWindow, false)
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
+  const exitedSnapshot: unknown = await webContents.executeJavaScript(`(() => {
+    const app = document.querySelector('#app-shell')
+    const button = document.querySelector('#fullscreen-player')
+    return {
+      appFullscreenClassRemoved: app?.classList.contains('player-fullscreen') === false,
+      enterLabelRestored: button?.getAttribute('aria-label') === '全屏' && !button?.classList.contains('is-fullscreen')
+    }
+  })()`)
+  const exited = exitedSnapshot && typeof exitedSnapshot === 'object'
+    ? exitedSnapshot as Record<string, unknown>
+    : {}
+  if (isBrowserWindowFullscreen(browserWindow)) {
+    if (process.platform === 'darwin') browserWindow.setSimpleFullScreen(false)
+    else browserWindow.setFullScreen(false)
+  }
+  return {
+    attempted: true,
+    enterButtonClicked,
+    enteredNativeFullscreen,
+    ...entered,
+    exitButtonClicked,
+    exitedNativeFullscreen,
+    ...exited,
+    passed:
+      enterButtonClicked === true &&
+      enteredNativeFullscreen &&
+      entered.appFullscreenClass === true &&
+      entered.controlsVisible === true &&
+      entered.exitLabelVisible === true &&
+      entered.playerFillsViewport === true &&
+      entered.surroundingChromeHidden === true &&
+      exitButtonClicked === true &&
+      exitedNativeFullscreen &&
+      exited.appFullscreenClassRemoved === true &&
+      exited.enterLabelRestored === true
+  }
+}
+
+async function waitForWindowFullscreenState(browserWindow: BrowserWindow, fullscreen: boolean): Promise<boolean> {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    if (browserWindow.isDestroyed()) return false
+    if (isBrowserWindowFullscreen(browserWindow) === fullscreen) return true
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+  }
+  return !browserWindow.isDestroyed() && isBrowserWindowFullscreen(browserWindow) === fullscreen
 }
 
 async function runPlaybackDiagnosticCheck(webContents: Electron.WebContents): Promise<Record<string, unknown>> {

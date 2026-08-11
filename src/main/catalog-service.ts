@@ -1,47 +1,30 @@
 import { app } from 'electron'
-import { mkdir, open, rename, unlink, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { unlink } from 'node:fs/promises'
+import { join } from 'node:path'
 import { applyFamilySafetyAllowlist, applyProjectDenylist, transformIptvData } from '../shared/catalog.ts'
-import {
-  CATALOG_LIMITS,
-  parseBoundedJsonArray,
-  parseCatalogCache,
-  serializeCatalogForCache,
-  UPSTREAM_RESPONSE_LIMITS,
-  type UpstreamEndpointName
-} from '../shared/catalog-limits.ts'
 import { createHlsAcceptanceCatalog, createOfflineSampleCatalog } from '../shared/sample-catalog.ts'
 import type {
   Catalog,
+  CatalogFailureCode,
+  CatalogLoadFailure,
   CatalogLoadResult,
-  UpstreamBlocklistEntry,
-  UpstreamBundle,
-  UpstreamCategory,
-  UpstreamChannel,
-  UpstreamCountry,
-  UpstreamLogo,
-  UpstreamStream
+  CatalogSyncProgress
 } from '../shared/contracts.ts'
-import { fetchBoundedHttps } from './secure-network.ts'
+import { readCatalogCacheFile, writeCatalogCacheAtomicAndVerify } from './catalog-cache.ts'
+import { fetchIptvOrgBundle, IptvOrgFetchError } from './catalog-upstream.ts'
 
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000
-const REQUEST_TIMEOUT_MS = 120_000
-const API_ROOT = 'https://iptv-org.github.io/api'
-
-const endpoints = {
-  channels: `${API_ROOT}/channels.json`,
-  streams: `${API_ROOT}/streams.json`,
-  countries: `${API_ROOT}/countries.json`,
-  categories: `${API_ROOT}/categories.json`,
-  logos: `${API_ROOT}/logos.json`,
-  blocklist: `${API_ROOT}/blocklist.json`
-} as const
+type ProgressReporter = (progress: CatalogSyncProgress) => void
 
 let inFlightLoad: Promise<CatalogLoadResult> | undefined
 
-export async function loadCatalog(forceRefresh = false, familySafety = false): Promise<CatalogLoadResult> {
+export async function loadCatalog(
+  forceRefresh = false,
+  familySafety = false,
+  report: ProgressReporter = () => undefined
+): Promise<CatalogLoadResult> {
   if (!inFlightLoad) {
-    inFlightLoad = loadCatalogInternal(forceRefresh).finally(() => {
+    inFlightLoad = loadCatalogInternal(forceRefresh, report).finally(() => {
       inFlightLoad = undefined
     })
   }
@@ -49,7 +32,16 @@ export async function loadCatalog(forceRefresh = false, familySafety = false): P
   return familySafety ? { ...result, catalog: applyFamilySafetyAllowlist(result.catalog) } : result
 }
 
-async function loadCatalogInternal(forceRefresh: boolean): Promise<CatalogLoadResult> {
+export function loadOfflineDemo(familySafety = false): CatalogLoadResult {
+  const catalog = applyProjectDenylist(createOfflineSampleCatalog())
+  return {
+    catalog: familySafety ? applyFamilySafetyAllowlist(catalog) : catalog,
+    cacheStatus: 'offline-sample',
+    warning: '离线演示模式：这是 8 个内置虚构样例，不是 iptv-org 真实频道目录。'
+  }
+}
+
+async function loadCatalogInternal(forceRefresh: boolean, report: ProgressReporter): Promise<CatalogLoadResult> {
   const smokeAcceptanceUrl = process.env.TVFEED_SMOKE_ACCEPTANCE_URL
   if (process.env.TVFEED_SMOKE_OUTPUT && process.env.TVFEED_SMOKE_PLAY === '1' && smokeAcceptanceUrl) {
     return {
@@ -59,14 +51,11 @@ async function loadCatalogInternal(forceRefresh: boolean): Promise<CatalogLoadRe
     }
   }
 
+  report({ stage: 'checking-cache', message: '正在检查本机频道目录…' })
   const cache = await readCache()
 
-  if (process.env.TVFEED_OFFLINE_DEMO === '1') {
-    return {
-      catalog: applyProjectDenylist(createOfflineSampleCatalog()),
-      cacheStatus: 'offline-sample',
-      warning: '离线演示模式：正在使用内置虚构样例，未请求网络。'
-    }
+  if (process.env.TVFEED_SMOKE_OUTPUT && process.env.TVFEED_SMOKE_OFFLINE_DEMO === '1') {
+    return loadOfflineDemo(false)
   }
 
   if (!forceRefresh && cache && Date.now() - Date.parse(cache.generatedAt) < CACHE_TTL_MS) {
@@ -75,15 +64,36 @@ async function loadCatalogInternal(forceRefresh: boolean): Promise<CatalogLoadRe
 
   try {
     if (process.env.TVFEED_SMOKE_OUTPUT && process.env.TVFEED_SMOKE_FORCE_NETWORK_FAILURE === '1') {
-      throw new Error('验收模式模拟目录网络失败')
+      throw new CatalogSyncError('network', '验收模式模拟目录网络失败', true)
     }
-    const bundle = await fetchUpstreamBundle()
-    const catalog = transformIptvData(bundle)
-    if (catalog.channels.length === 0) throw new Error('目录过滤后没有可用频道')
-    await writeCache(catalog)
-    return { catalog, cacheStatus: 'network', warning: '' }
+    const upstream = await fetchIptvOrgBundle(report)
+    report({ stage: 'processing', message: '正在安全清洗和整理频道目录…' })
+    let catalog: Catalog
+    try {
+      catalog = transformIptvData(upstream.bundle)
+    } catch (error) {
+      throw new CatalogSyncError(
+        'invalid-data',
+        'iptv-org 返回的数据无法生成安全目录',
+        false,
+        error
+      )
+    }
+    if (catalog.channels.length === 0) {
+      throw new CatalogSyncError('invalid-data', '安全过滤后没有可用的真实频道', false)
+    }
+    report({ stage: 'writing-cache', message: '正在原子写入本机频道缓存…' })
+    let persisted: Catalog
+    try {
+      persisted = await writeCatalogCacheAtomicAndVerify(cachePath(), catalog, () => {
+        report({ stage: 'verifying-cache', message: '正在重新读取并验证刚写入的频道缓存…' })
+      })
+    } catch (error) {
+      throw new CatalogSyncError('cache-write', '频道目录缓存写入或复读验证失败', false, error)
+    }
+    return { catalog: applyProjectDenylist(persisted), cacheStatus: 'network', warning: upstream.warnings.join(' ') }
   } catch (error) {
-    const reason = toErrorMessage(error)
+    const reason = toCatalogLoadFailure(error).message
     if (cache) {
       return {
         catalog: cache,
@@ -92,43 +102,8 @@ async function loadCatalogInternal(forceRefresh: boolean): Promise<CatalogLoadRe
       }
     }
 
-    return {
-      catalog: applyProjectDenylist(createOfflineSampleCatalog()),
-      cacheStatus: 'offline-sample',
-      warning: `iptv-org 暂时无法连接，已切换到内置离线样例。${reason}`
-    }
+    throw error
   }
-}
-
-async function fetchUpstreamBundle(): Promise<UpstreamBundle> {
-  // Refreshes happen at most twice a day. Two bounded responses at a time avoid
-  // the six-response peak while keeping the large public catalog usable.
-  const [channels, logos] = await Promise.all([
-    fetchJsonArray<UpstreamChannel>('channels', endpoints.channels, '频道'),
-    fetchJsonArray<UpstreamLogo>('logos', endpoints.logos, '台标')
-  ])
-  const [streams, blocklist] = await Promise.all([
-    fetchJsonArray<UpstreamStream>('streams', endpoints.streams, '线路'),
-    fetchJsonArray<UpstreamBlocklistEntry>('blocklist', endpoints.blocklist, '屏蔽列表')
-  ])
-  const [countries, categories] = await Promise.all([
-    fetchJsonArray<UpstreamCountry>('countries', endpoints.countries, '国家'),
-    fetchJsonArray<UpstreamCategory>('categories', endpoints.categories, '分类')
-  ])
-
-  return { channels, streams, countries, categories, logos, blocklist }
-}
-
-async function fetchJsonArray<T>(endpoint: UpstreamEndpointName, url: string, label: string): Promise<T[]> {
-  const limits = UPSTREAM_RESPONSE_LIMITS[endpoint]
-  const response = await fetchBoundedHttps(url, {
-    accept: 'application/json',
-    allowCompression: true,
-    maxBytes: limits.maxBytes,
-    timeoutMs: REQUEST_TIMEOUT_MS
-  })
-  if (response.contentType !== 'application/json') throw new Error(`${label}接口返回了非 JSON 内容`)
-  return parseBoundedJsonArray(response.body, label, limits.maxRecords) as T[]
 }
 
 function cachePath(): string {
@@ -146,45 +121,61 @@ export async function clearCatalogCache(): Promise<boolean> {
 }
 
 async function readCache(): Promise<Catalog | undefined> {
-  let handle: Awaited<ReturnType<typeof open>> | undefined
-  try {
-    handle = await open(cachePath(), 'r')
-    const before = await handle.stat()
-    if (!before.isFile() || before.size <= 0 || before.size > CATALOG_LIMITS.maxCacheBytes) return undefined
+  const parsed = await readCatalogCacheFile(cachePath())
+  return parsed ? applyProjectDenylist(parsed) : undefined
+}
 
-    const body = new Uint8Array(before.size)
-    let offset = 0
-    while (offset < body.byteLength) {
-      const { bytesRead } = await handle.read(body, offset, body.byteLength - offset, offset)
-      if (bytesRead === 0) return undefined
-      offset += bytesRead
-    }
-    const after = await handle.stat()
-    if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return undefined
-    const parsed = parseCatalogCache(body)
-    return parsed ? applyProjectDenylist(parsed) : undefined
-  } catch {
-    return undefined
-  } finally {
-    await handle?.close().catch(() => undefined)
+export function toCatalogLoadFailure(error: unknown): CatalogLoadFailure {
+  const normalized = normalizeCatalogError(error)
+  const copy: Record<CatalogFailureCode, { title: string; message: string }> = {
+    proxy: { title: '代理连接失败', message: '无法通过当前代理连接 iptv-org，请检查 macOS、PAC、VPN 或本机代理状态。' },
+    dns: { title: '域名解析失败', message: '无法解析 iptv-org 的公网地址，请检查 DNS 或网络连接。' },
+    timeout: { title: '连接 iptv-org 超时', message: '频道目录请求超过时间上限，可以稍后重新尝试。' },
+    http: { title: 'iptv-org 暂时不可用', message: '上游服务返回临时错误，可以稍后重新尝试。' },
+    security: { title: '安全检查未通过', message: '远程响应没有通过公网地址、TLS、重定向或大小限制检查。' },
+    'safety-data': { title: '安全过滤数据获取失败', message: 'blocklist 是当前安全策略的必需输入，未获取成功前不会展示真实频道。' },
+    'invalid-data': { title: '频道目录格式异常', message: 'iptv-org 响应无法生成符合当前安全规则的频道目录。' },
+    'cache-write': { title: '本机缓存验证失败', message: '频道目录已获取，但未能安全写入并重新读取本机缓存。' },
+    network: { title: '无法连接 iptv-org', message: '当前网络无法完成频道目录同步，请检查连接后重新尝试。' },
+    unknown: { title: '频道目录加载失败', message: '发生了未识别的目录错误，请重新尝试。' }
+  }
+  return {
+    code: normalized.code,
+    title: copy[normalized.code].title,
+    message: copy[normalized.code].message,
+    detail: sanitizeFailureDetail(normalized.detail),
+    retryable: normalized.retryable
   }
 }
 
-async function writeCache(catalog: Catalog): Promise<void> {
-  const destination = cachePath()
-  const temporary = `${destination}.tmp`
-  const serialized = serializeCatalogForCache(catalog)
-  await mkdir(dirname(destination), { recursive: true })
-  await writeFile(temporary, serialized, { encoding: 'utf8', mode: 0o600 })
-  await rename(temporary, destination)
+class CatalogSyncError extends Error {
+  readonly code: CatalogFailureCode
+  readonly retryable: boolean
+
+  constructor(code: CatalogFailureCode, message: string, retryable: boolean, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause })
+    this.name = 'CatalogSyncError'
+    this.code = code
+    this.retryable = retryable
+  }
 }
 
-function toErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    if (error.name === 'AbortError') return '请求超时。'
-    return error.message ? `原因：${error.message}` : ''
+function normalizeCatalogError(error: unknown): { code: CatalogFailureCode; retryable: boolean; detail: string } {
+  if (error instanceof CatalogSyncError || error instanceof IptvOrgFetchError) {
+    return { code: error.code, retryable: error.retryable, detail: error.message }
   }
-  return ''
+  return {
+    code: 'unknown',
+    retryable: false,
+    detail: error instanceof Error ? error.message : String(error)
+  }
+}
+
+function sanitizeFailureDetail(value: string): string {
+  return value
+    .replace(/https:\/\/[^\s)]+/gi, '[远程地址]')
+    .replace(/(token|signature|key|password)=[^&\s]+/gi, '$1=[已隐藏]')
+    .slice(0, 1_000)
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
