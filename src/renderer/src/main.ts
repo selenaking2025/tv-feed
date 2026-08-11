@@ -1,7 +1,15 @@
 import './styles.css'
 import { applyFamilySafetyAllowlist } from '../../shared/catalog.ts'
+import {
+  appendChannelNumberDigit,
+  CHANNEL_NUMBER_COMMIT_DELAY_MS,
+  channelIndexForNumber,
+  hasLongerChannelNumber
+} from '../../shared/channel-shortcuts.ts'
 import type { CacheStatus, Catalog, CatalogChannel, CatalogLoadResult, CatalogSource } from '../../shared/contracts.ts'
 import { displayCountryName, getCountrySearchAliases, sortCountriesForDisplay } from '../../shared/countries.ts'
+import { hasVerifiedOfficialSource, isVerifiedOfficialSource } from '../../shared/official-sources.ts'
+import type { PlaybackDiagnostic } from '../../shared/playback-diagnostics.ts'
 import { StreamPlayer, type PlaybackState } from './player.ts'
 
 type ViewMode = 'all' | 'chinese' | 'favorites' | 'recent'
@@ -54,6 +62,8 @@ const elements = {
   favorite: required<HTMLButtonElement>('#favorite-channel'),
   sourceList: required<HTMLElement>('#source-list'),
   sourceHelp: required<HTMLElement>('#source-help'),
+  channelHealth: required<HTMLElement>('#channel-health'),
+  playbackDiagnostic: required<HTMLElement>('#playback-diagnostic'),
   catalogInfo: required<HTMLButtonElement>('#catalog-info'),
   infoDialog: required<HTMLDialogElement>('#info-dialog'),
   dialogClose: required<HTMLButtonElement>('#dialog-close'),
@@ -65,7 +75,8 @@ const elements = {
   clearCatalogCache: required<HTMLButtonElement>('#clear-catalog-cache'),
   clearViewingData: required<HTMLButtonElement>('#clear-viewing-data'),
   privacyStatus: required<HTMLElement>('#privacy-control-status'),
-  toastRegion: required<HTMLElement>('#toast-region')
+  toastRegion: required<HTMLElement>('#toast-region'),
+  announcementRegion: required<HTMLElement>('#announcement-region')
 }
 
 let catalog: Catalog | undefined
@@ -82,6 +93,9 @@ let remoteLogosEnabled = !familySafetyEnabled && readStoredBoolean(REMOTE_LOGOS_
 let currentCacheStatus: CacheStatus = 'offline-sample'
 let logoRequestSequence = 0
 let activeLogoRequests = 0
+let channelNumberBuffer = ''
+let channelNumberTimer: number | undefined
+let announcementTimer: number | undefined
 const logoQueue: Array<() => Promise<void>> = []
 const activeLogoRequestIds = new Set<string>()
 const activeLogoObjectUrls = new Set<string>()
@@ -224,6 +238,7 @@ function replaceSelectOptions(select: HTMLSelectElement, allLabel: string, optio
 
 function applyFilters(): void {
   if (!catalog) return
+  resetChannelNumberBuffer()
   const query = elements.search.value.trim().toLocaleLowerCase()
   const countryCode = elements.country.value
   const categoryId = elements.category.value
@@ -287,7 +302,11 @@ function createChannelRow(channel: CatalogChannel, index: number): HTMLElement {
   select.className = 'channel-select'
   select.type = 'button'
   select.dataset.channelIndex = String(index)
-  select.setAttribute('aria-label', `播放 ${channel.name}，${channel.countryName}，${channel.sources.length} 条线路`)
+  const containsVerifiedOfficialSource = hasVerifiedOfficialSource(channel)
+  select.setAttribute(
+    'aria-label',
+    `播放 ${channel.name}，${channel.countryName}，${channel.sources.length} 条线路${containsVerifiedOfficialSource ? '，包含人工核对的官方线路' : ''}`
+  )
   select.addEventListener('click', () => selectChannel(channel.id, true, true))
   select.addEventListener('keydown', handleRowKeydown)
 
@@ -297,6 +316,10 @@ function createChannelRow(channel: CatalogChannel, index: number): HTMLElement {
   const name = document.createElement('span')
   name.className = 'channel-name'
   name.textContent = channel.name
+  const nameLine = document.createElement('span')
+  nameLine.className = 'channel-name-line'
+  nameLine.append(name)
+  if (containsVerifiedOfficialSource) nameLine.append(createOfficialBadge('含官方源'))
   const subtitle = document.createElement('span')
   subtitle.className = 'channel-subtitle'
   const region = document.createElement('span')
@@ -307,7 +330,7 @@ function createChannelRow(channel: CatalogChannel, index: number): HTMLElement {
   sourceCount.className = 'source-count'
   sourceCount.textContent = `${channel.sources.length} 线`
   subtitle.append(region, separator, sourceCount)
-  copy.append(name, subtitle)
+  copy.append(nameLine, subtitle)
   select.append(logo, copy)
 
   const favorite = document.createElement('button')
@@ -329,7 +352,6 @@ function handleRowKeydown(event: KeyboardEvent): void {
   const target = clamp(current + (event.key === 'ArrowDown' ? 1 : -1), 0, filteredChannels.length - 1)
   const channel = filteredChannels[target]
   if (!channel) return
-  selectChannel(channel.id, false, false)
   ensureChannelVisible(target)
   requestAnimationFrame(() => {
     elements.channelWindow.querySelector<HTMLButtonElement>(`.channel-select[data-channel-index="${target}"]`)?.focus()
@@ -348,6 +370,9 @@ function selectChannel(channelId: string, autoplay: boolean, rememberRecent: boo
   renderVirtualRows()
   renderChannelDetail(channel)
   renderSources(channel)
+  clearPlaybackDiagnostic()
+  if (!autoplay) updateChannelHealth('not-checked')
+  announce(`已选择频道 ${channel.name}`)
 
   if (autoplay && channel.sources[0]) playSource(channel.sources[0], 0)
   if (window.innerWidth <= 1040 && autoplay) closeSidebar()
@@ -355,7 +380,11 @@ function selectChannel(channelId: string, autoplay: boolean, rememberRecent: boo
 
 function renderChannelDetail(channel: CatalogChannel): void {
   elements.channelTitle.textContent = channel.name
-  elements.channelMeta.textContent = `${channel.flag} ${displayCountryName(channel.countryCode, channel.countryName)} · ${channel.categoryNames.join(' / ') || '综合频道'}`.trim()
+  const metaText = document.createElement('span')
+  metaText.textContent = `${channel.flag} ${displayCountryName(channel.countryCode, channel.countryName)} · ${channel.categoryNames.join(' / ') || '综合频道'}`.trim()
+  const metaNodes: Node[] = [metaText]
+  if (hasVerifiedOfficialSource(channel)) metaNodes.push(createOfficialBadge('含官方源'))
+  elements.channelMeta.replaceChildren(...metaNodes)
   if (catalog?.source === 'offline-sample') {
     elements.channelDescription.textContent = `${channel.sources.length} 条内置演示线路 · 不代表真实频道或直播源`
   } else {
@@ -599,8 +628,12 @@ function renderSources(channel: CatalogChannel): void {
     button.className = 'source-button'
     button.dataset.sourceButton = 'true'
     button.setAttribute('aria-pressed', String(index === activeSourceIndex && player.hasSource))
-    button.textContent = sourceLabel(source, index)
-    button.title = source.title || source.url
+    const label = sourceLabel(source, index)
+    const verifiedOfficial = isVerifiedOfficialSource(channel, source)
+    button.append(document.createTextNode(label))
+    if (verifiedOfficial) button.append(createOfficialBadge())
+    button.title = verifiedOfficial ? `${label}（已核对官方主机）` : label
+    button.setAttribute('aria-label', verifiedOfficial ? `${label}，官方源` : label)
     button.addEventListener('click', () => {
       failedSources = new Set()
       playSource(source, index)
@@ -610,7 +643,7 @@ function renderSources(channel: CatalogChannel): void {
   elements.sourceList.replaceChildren(...nodes)
 }
 
-function playSource(source: CatalogSource, index: number): void {
+function playSource(source: CatalogSource, index: number, preserveDiagnostic = false): void {
   const channel = getChannel(selectedChannelId)
   if (!channel) return
   activeSourceIndex = index
@@ -618,6 +651,8 @@ function playSource(source: CatalogSource, index: number): void {
   elements.playerEmpty.hidden = true
   elements.nowPlaying.hidden = false
   elements.sourceQuality.textContent = source.quality
+  if (!preserveDiagnostic) clearPlaybackDiagnostic()
+  updateChannelHealth('checking')
   updateSourceButtons()
   player.load(source, true)
 }
@@ -628,20 +663,21 @@ function updateSourceButtons(): void {
   }
 }
 
-function handleFatalSource(message: string): void {
+function handleFatalSource(diagnostic: PlaybackDiagnostic): void {
   const channel = getChannel(selectedChannelId)
   const current = channel?.sources[activeSourceIndex]
   if (!channel || !current) return
+  renderPlaybackDiagnostic(diagnostic)
   failedSources.add(current.id)
   const nextIndex = channel.sources.findIndex((source) => !failedSources.has(source.id))
   if (nextIndex >= 0) {
-    showToast(`${message}，正在尝试线路 ${nextIndex + 1}`)
+    showToast(`${diagnostic.title}，正在尝试线路 ${nextIndex + 1}`)
     const nextSource = channel.sources[nextIndex]
-    if (nextSource) playSource(nextSource, nextIndex)
+    if (nextSource) playSource(nextSource, nextIndex, true)
     return
   }
-  updatePlaybackState('error', '这个频道的线路当前无法播放，请稍后重试')
-  showToast('所有线路均连接失败，可换台或稍后再试', 6000)
+  updatePlaybackState('error', `${diagnostic.title}：${diagnostic.message}`)
+  showToast(`所有线路均连接失败；最后一次：${diagnostic.title}`, 6000)
 }
 
 function updatePlaybackState(state: PlaybackState, message: string): void {
@@ -650,8 +686,17 @@ function updatePlaybackState(state: PlaybackState, message: string): void {
   elements.playerStatus.classList.toggle('error', state === 'error')
   elements.playerStatus.hidden = state === 'idle' || state === 'playing' || (state === 'paused' && !message)
   elements.playerStatusText.textContent = message || (state === 'paused' ? '已暂停' : '')
-  if (state === 'idle') {
+  if (state === 'loading') updateChannelHealth('checking')
+  else if (state === 'playing') {
+    updateChannelHealth('playable')
+    clearPlaybackDiagnostic()
+  } else if (state === 'paused') updateChannelHealth('connected')
+  else if (state === 'error') updateChannelHealth('unavailable')
+  else updateChannelHealth('not-checked')
+  if (state === 'idle' || state === 'error') {
     elements.nowPlaying.hidden = true
+  }
+  if (state === 'idle') {
     updateSourceButtons()
   }
 }
@@ -675,6 +720,8 @@ function stopPlayback(): void {
   player.stop()
   failedSources = new Set()
   elements.playerEmpty.hidden = false
+  clearPlaybackDiagnostic()
+  updateChannelHealth('not-checked')
   updateSourceButtons()
 }
 
@@ -765,6 +812,7 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
     closeSidebar()
     return
   }
+  if (elements.infoDialog.open) return
   if (isEditing) return
   if (event.key === '/') {
     event.preventDefault()
@@ -774,7 +822,21 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
   }
   if (target instanceof HTMLButtonElement) return
 
+  if (/^\d$/.test(event.key) && !event.repeat) {
+    event.preventDefault()
+    queueChannelNumber(event.key)
+    return
+  }
+
   switch (event.key.toLocaleLowerCase()) {
+    case 'arrowdown':
+      event.preventDefault()
+      moveChannel(1)
+      break
+    case 'arrowup':
+      event.preventDefault()
+      moveChannel(-1)
+      break
     case 'j':
       event.preventDefault()
       moveChannel(1)
@@ -790,6 +852,20 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
     case 'f':
       event.preventDefault()
       void toggleFullscreen()
+      break
+    case 'm':
+      event.preventDefault()
+      announceVolume(player.toggleMuted())
+      break
+    case '+':
+    case '=':
+      event.preventDefault()
+      announceVolume(player.adjustVolume(0.1))
+      break
+    case '-':
+    case '_':
+      event.preventDefault()
+      announceVolume(player.adjustVolume(-0.1))
       break
     case ' ':
       event.preventDefault()
@@ -862,6 +938,99 @@ function getChannel(channelId: string): CatalogChannel | undefined {
 function sourceLabel(source: CatalogSource, index: number): string {
   const details = [source.quality, source.label, source.feed].filter(Boolean).join(' · ')
   return `线路 ${index + 1}${details ? ` · ${details}` : ''}`
+}
+
+function createOfficialBadge(label = '官方源'): HTMLElement {
+  const badge = document.createElement('span')
+  badge.className = 'official-source-badge'
+  badge.textContent = label
+  badge.title = '频道 ID 与当前线路主机均经过人工核对'
+  return badge
+}
+
+type ChannelHealthState = 'not-checked' | 'checking' | 'playable' | 'connected' | 'unavailable'
+
+function updateChannelHealth(state: ChannelHealthState): void {
+  const labels: Record<ChannelHealthState, string> = {
+    'not-checked': '选择并播放后检测',
+    checking: '正在检测当前线路',
+    playable: '当前线路可播放',
+    connected: '当前线路已连接',
+    unavailable: '当前线路不可用'
+  }
+  elements.channelHealth.dataset.state = state
+  elements.channelHealth.textContent = labels[state]
+}
+
+function renderPlaybackDiagnostic(diagnostic: PlaybackDiagnostic): void {
+  elements.playbackDiagnostic.hidden = false
+  elements.playbackDiagnostic.dataset.code = diagnostic.code
+  elements.playbackDiagnostic.replaceChildren()
+  const title = document.createElement('strong')
+  title.textContent = diagnostic.title
+  const message = document.createElement('span')
+  message.textContent = diagnostic.message
+  elements.playbackDiagnostic.append(title, message)
+}
+
+function clearPlaybackDiagnostic(): void {
+  elements.playbackDiagnostic.hidden = true
+  delete elements.playbackDiagnostic.dataset.code
+  elements.playbackDiagnostic.replaceChildren()
+}
+
+function queueChannelNumber(digit: string): void {
+  const next = appendChannelNumberDigit(channelNumberBuffer, digit, filteredChannels.length)
+  if (!next) {
+    announce('频道编号从 1 开始')
+    return
+  }
+  channelNumberBuffer = next
+  announce(`频道编号 ${channelNumberBuffer}`)
+
+  if (channelNumberTimer !== undefined) window.clearTimeout(channelNumberTimer)
+  if (!hasLongerChannelNumber(channelNumberBuffer, filteredChannels.length)) {
+    commitChannelNumber()
+    return
+  }
+  channelNumberTimer = window.setTimeout(commitChannelNumber, CHANNEL_NUMBER_COMMIT_DELAY_MS)
+}
+
+function commitChannelNumber(): void {
+  if (channelNumberTimer !== undefined) window.clearTimeout(channelNumberTimer)
+  channelNumberTimer = undefined
+  const value = channelNumberBuffer
+  channelNumberBuffer = ''
+  const index = channelIndexForNumber(value, filteredChannels.length)
+  const channel = index === undefined ? undefined : filteredChannels[index]
+  if (!channel || index === undefined) {
+    announce(`没有频道编号 ${value}`)
+    showToast(`没有频道编号 ${value}`)
+    return
+  }
+  selectChannel(channel.id, true, true)
+  ensureChannelVisible(index)
+}
+
+function resetChannelNumberBuffer(): void {
+  channelNumberBuffer = ''
+  if (channelNumberTimer !== undefined) window.clearTimeout(channelNumberTimer)
+  channelNumberTimer = undefined
+}
+
+function announceVolume(state: Readonly<{ muted: boolean; percent: number }>): void {
+  const message = state.muted ? '已静音' : `音量 ${state.percent}%`
+  announce(message)
+  showToast(message)
+}
+
+function announce(message: string): void {
+  if (announcementTimer !== undefined) window.clearTimeout(announcementTimer)
+  elements.announcementRegion.textContent = ''
+  announcementTimer = window.setTimeout(() => {
+    elements.announcementRegion.textContent = message
+    announcementTimer = undefined
+  }, 20)
 }
 
 function emptyMessage(): string {

@@ -1,12 +1,21 @@
 import Hls from 'hls.js'
 import type { CatalogSource } from '../../shared/contracts.ts'
+import {
+  classifyPlaybackDiagnostic,
+  type PlaybackDiagnostic
+} from '../../shared/playback-diagnostics.ts'
 import { SecureHlsLoader } from './secure-hls-loader.ts'
 
 export type PlaybackState = 'idle' | 'loading' | 'playing' | 'paused' | 'error'
 
 interface PlayerCallbacks {
   onState(state: PlaybackState, message: string): void
-  onFatal(message: string): void
+  onFatal(diagnostic: PlaybackDiagnostic): void
+}
+
+export interface VolumeState {
+  muted: boolean
+  percent: number
 }
 
 export class StreamPlayer {
@@ -30,6 +39,13 @@ export class StreamPlayer {
 
   get isPlaying(): boolean {
     return this.hasSource && !this.video.paused && !this.video.ended
+  }
+
+  get volumeState(): VolumeState {
+    return {
+      muted: this.video.muted || this.video.volume === 0,
+      percent: Math.round(this.video.volume * 100)
+    }
   }
 
   load(source: CatalogSource, autoplay = true): void {
@@ -61,7 +77,7 @@ export class StreamPlayer {
           this.hls?.recoverMediaError()
           return
         }
-        this.fail(data.details ? `线路错误：${data.details}` : '线路无法播放')
+        this.fail(data.details, data.error, data.response?.text, data.reason, data.type)
       })
       return
     }
@@ -87,6 +103,18 @@ export class StreamPlayer {
     this.callbacks.onState('idle', '')
   }
 
+  toggleMuted(): VolumeState {
+    this.video.muted = !this.video.muted
+    return this.volumeState
+  }
+
+  adjustVolume(delta: number): VolumeState {
+    const nextVolume = Math.min(1, Math.max(0, this.video.volume + delta))
+    this.video.volume = Math.round(nextVolume * 10) / 10
+    if (this.video.volume > 0) this.video.muted = false
+    return this.volumeState
+  }
+
   async togglePictureInPicture(): Promise<void> {
     if (!this.currentSource) throw new Error('请先播放一个频道')
     if (!document.pictureInPictureEnabled || typeof this.video.requestPictureInPicture !== 'function') {
@@ -108,12 +136,13 @@ export class StreamPlayer {
     }
   }
 
-  private fail(message: string): void {
+  private fail(...inputs: readonly unknown[]): void {
     if (!this.currentSource) return
-    this.callbacks.onState('error', message)
+    const diagnostic = classifyPlaybackDiagnostic(...inputs)
+    this.callbacks.onState('error', diagnostic.message)
     this.hls?.destroy()
     this.hls = undefined
-    this.callbacks.onFatal(message)
+    this.callbacks.onFatal(diagnostic)
   }
 
   private releaseMedia(): void {

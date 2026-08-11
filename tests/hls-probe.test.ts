@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { parseHlsPlaylist, probeHlsSource, type HlsProbeFetcher } from '../src/main/hls-probe.ts'
-import { OFFICIAL_SOURCE_POLICIES, isVerifiedOfficialSource } from '../src/shared/official-sources.ts'
+import {
+  hasVerifiedOfficialSource,
+  OFFICIAL_SOURCE_POLICIES,
+  isVerifiedOfficialSource
+} from '../src/shared/official-sources.ts'
 
 const encoder = new TextEncoder()
 
@@ -19,6 +23,17 @@ test('官方源清单只通过频道 ID 与精确批准主机的组合', () => {
     { id: 'Unknown.example' },
     { url: 'https://news.cgtn.com/live.m3u8' }
   ), false)
+  assert.equal(hasVerifiedOfficialSource({
+    id: 'CGTN.cn',
+    sources: [
+      { id: '1', url: 'https://news.cgtn.com.evil.example/live.m3u8', title: '', quality: '', label: '', feed: '' },
+      { id: '2', url: 'https://news.cgtn.com/live.m3u8', title: '', quality: '', label: '', feed: '' }
+    ]
+  }), true)
+  assert.equal(hasVerifiedOfficialSource({
+    id: 'Unknown.example',
+    sources: [{ id: '1', url: 'https://news.cgtn.com/live.m3u8', title: '', quality: '', label: '', feed: '' }]
+  }), false)
 })
 
 test('HLS 解析器识别 Master、相对路径和媒体线路', () => {

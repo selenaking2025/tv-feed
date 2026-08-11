@@ -77,8 +77,8 @@
           </div>
 
           <div class="list-summary">
-            <span id="result-count">准备频道目录</span>
-            <span class="keyboard-hint" aria-hidden="true">J / K 换台</span>
+            <span id="result-count" role="status" aria-live="polite" aria-atomic="true">准备频道目录</span>
+            <span class="keyboard-hint" aria-hidden="true">↑ / ↓ 或 J / K 换台</span>
           </div>
 
           <div class="channel-list" id="channel-list" role="list" aria-label="频道列表" tabindex="-1">
@@ -119,7 +119,7 @@
               <small>播放时你的设备会直接连接第三方源站；线路可用性会变化。</small>
             </div>
 
-            <div class="player-status-overlay" id="player-status-overlay" hidden>
+            <div class="player-status-overlay" id="player-status-overlay" role="status" aria-live="polite" aria-atomic="true" hidden>
               <span class="status-spinner" aria-hidden="true"></span>
               <span id="player-status-text">正在连接…</span>
             </div>
@@ -180,17 +180,24 @@
                 <p class="eyebrow">SIGNAL SOURCES</p>
                 <h3 id="source-heading">播放线路</h3>
               </div>
-              <p id="source-help">选台后会显示候选线路；失败时自动尝试下一条。</p>
+              <div class="source-guidance">
+                <p id="source-help">选台后会显示候选线路；失败时自动尝试下一条。</p>
+                <p class="channel-health" id="channel-health" data-state="not-checked" role="status" aria-live="polite" aria-atomic="true">选择并播放后检测</p>
+              </div>
             </div>
             <div class="source-list" id="source-list">
               <span class="source-placeholder">尚未选择频道</span>
             </div>
+            <p class="playback-diagnostic" id="playback-diagnostic" role="status" aria-live="polite" aria-atomic="true" hidden></p>
           </section>
 
           <section class="shortcut-strip" aria-label="键盘快捷键">
             <span><kbd>/</kbd> 搜索</span>
-            <span><kbd>J</kbd><kbd>K</kbd> 换台</span>
+            <span><kbd>↑</kbd><kbd>↓</kbd> 换台</span>
+            <span><kbd>0–9</kbd> 数字选台</span>
             <span><kbd>Space</kbd> 播放 / 暂停</span>
+            <span><kbd>M</kbd> 静音</span>
+            <span><kbd>−</kbd><kbd>+</kbd> 音量</span>
             <span><kbd>P</kbd> 画中画</span>
             <span><kbd>F</kbd> 全屏</span>
           </section>
@@ -212,6 +219,7 @@
         <p>TV Feed 是本地运行的 IPTV 播放器和频道阅读器。频道元数据与直播 URL 索引来自 iptv-org；播放时由你的设备直接连接第三方源站。项目不托管、代理、录制或重新分发电视内容。</p>
         <dl id="catalog-stats"></dl>
         <p class="dialog-note">过滤策略：只保留上游明确标记为非成人、未停播、未列入 blocklist，并可由浏览器直接请求的 HTTPS HLS 线路。该规则依赖上游元数据，不识别直播画面；误标、内容变化或源站替换仍可能造成遗漏。</p>
+        <p class="dialog-note">“官方源”只表示频道 ID 与当前线路的精确主机同时匹配本项目的人工核对表；它不代表节目授权、所在地区可用性或电视台对本项目的背书。线路健康状态只依据用户实际发起的当前播放请求，不会在后台扫描目录。</p>
         <section class="privacy-controls" aria-labelledby="privacy-controls-title">
           <div class="privacy-heading">
             <h3 id="privacy-controls-title">本地与网络设置</h3>
@@ -243,6 +251,7 @@
     </dialog>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <div class="sr-only" id="announcement-region" role="status" aria-live="polite" aria-atomic="true"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

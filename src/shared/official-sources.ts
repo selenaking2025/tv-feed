@@ -52,6 +52,10 @@ export function isVerifiedOfficialSource(channel: Pick<CatalogChannel, 'id'>, so
   }
 }
 
+export function hasVerifiedOfficialSource(channel: Pick<CatalogChannel, 'id' | 'sources'>): boolean {
+  return channel.sources.some((source) => isVerifiedOfficialSource(channel, source))
+}
+
 function policy(
   channelId: string,
   officialWebsite: string,

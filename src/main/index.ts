@@ -91,7 +91,7 @@ function createMainWindow(): void {
         if (smokeHandled || !mainWindow) return
         smokeHandled = true
         void runSmokeInspection(mainWindow.webContents)
-      }, process.env.TVFEED_SMOKE_LIVE === '1' && process.env.TVFEED_SMOKE_FORCE_NETWORK_FAILURE !== '1' ? 90_000 : 2_500)
+      }, process.env.TVFEED_SMOKE_LIVE === '1' && process.env.TVFEED_SMOKE_FORCE_NETWORK_FAILURE !== '1' ? 370_000 : 2_500)
     })
     mainWindow.webContents.on('did-fail-load', (_event, code, description, validatedUrl) => {
       process.stderr.write(`TVFEED_DIAGNOSTIC load-failed ${code} ${sanitizeDiagnostic(description)} ${sanitizeDiagnostic(validatedUrl)}\n`)
@@ -278,12 +278,12 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
   try {
     const playbackCheck = await runPlaybackCheck(webContents)
     const familySafetyCheck = await runFamilySafetyCheck(webContents)
+    const playbackDiagnosticCheck = await runPlaybackDiagnosticCheck(webContents)
     const directExternalFetchBlocked: unknown = await webContents.executeJavaScript(
       `fetch('https://127.0.0.1/tv-feed-security-smoke').then(() => false, () => true)`
     )
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 350))
-    const image = await webContents.capturePage()
-    const domResult: unknown = await webContents.executeJavaScript(`(() => {
+    const domResult: unknown = await webContents.executeJavaScript(`(async () => {
       const app = document.querySelector('[data-app-ready="true"]')
       const rows = document.querySelectorAll('[data-channel-row]')
       const visibleChannelNames = [...document.querySelectorAll('.channel-name')]
@@ -297,6 +297,11 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         ? [...countrySelect.options].slice(0, 6).map((option) => ({ value: option.value, label: option.textContent ?? '' }))
         : []
       const sourceButtons = document.querySelectorAll('[data-source-button]')
+      const resultCount = document.querySelector('#result-count')
+      const channelHealth = document.querySelector('#channel-health')
+      const playerStatus = document.querySelector('#player-status-overlay')
+      const announcementRegion = document.querySelector('#announcement-region')
+      const shortcutText = document.querySelector('.shortcut-strip')?.textContent ?? ''
       const favorite = document.querySelector('#favorite-channel')
       const storageBeforeInteraction = {
         favorites: localStorage.getItem('tvfeed:favorites:v1'),
@@ -305,6 +310,26 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
       }
       const remoteLogoToggle = document.querySelector('#remote-logo-toggle')
       const familySafetyToggle = document.querySelector('#family-safety-toggle')
+      const infoDialog = document.querySelector('#info-dialog')
+      const modalOpen = infoDialog instanceof HTMLDialogElement && infoDialog.open
+      const focusOutlineVisible = [...document.styleSheets].some((sheet) =>
+        [...sheet.cssRules].some((rule) => rule instanceof CSSStyleRule &&
+          rule.selectorText.includes(':focus-visible') &&
+          rule.style.outlineStyle !== 'none' &&
+          parseFloat(rule.style.outlineWidth) >= 2)
+      )
+      const mutedBefore = video instanceof HTMLVideoElement ? video.muted : null
+      const volumeBefore = video instanceof HTMLVideoElement ? video.volume : null
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', bubbles: true }))
+      const muteChanged = video instanceof HTMLVideoElement && mutedBefore !== null && video.muted !== mutedBefore
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', bubbles: true }))
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: '-', bubbles: true }))
+      const volumeChanged = video instanceof HTMLVideoElement && volumeBefore !== null && video.volume < volumeBefore
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: '+', bubbles: true }))
+      const muteShortcutWorks = !modalOpen && muteChanged
+      const volumeShortcutWorks = !modalOpen && volumeChanged
+      const modalShortcutIsolationWorks = modalOpen && !muteChanged && !volumeChanged
+      await new Promise((resolve) => setTimeout(resolve, 40))
       const favoriteBefore = favorite?.getAttribute('aria-pressed')
       favorite?.click()
       const favoriteToggleWorks = Boolean(favoriteBefore && favorite?.getAttribute('aria-pressed') !== favoriteBefore)
@@ -316,6 +341,15 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
       }
       const chinaSearchResult = document.querySelector('#result-count')?.textContent ?? ''
       const chinaSearchWorks = !chinaSearchResult.startsWith('0 ')
+      let officialSourceMarkingCheck = { attempted: false, passed: false, badges: 0 }
+      if (${JSON.stringify(process.env.TVFEED_SMOKE_LIVE === '1')}) {
+        if (search instanceof HTMLInputElement) {
+          search.value = 'CGTN'
+          search.dispatchEvent(new Event('input', { bubbles: true }))
+        }
+        const badges = document.querySelectorAll('.official-source-badge').length
+        officialSourceMarkingCheck = { attempted: true, passed: badges > 0, badges }
+      }
       if (search instanceof HTMLInputElement) {
         search.value = '__tvfeed_smoke_no_match__'
         search.dispatchEvent(new Event('input', { bubbles: true }))
@@ -340,6 +374,8 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         hasVideo: video instanceof HTMLVideoElement,
         selectedChannel: selected?.getAttribute('data-channel-id') ?? document.querySelector('#channel-title')?.textContent ?? '',
         sourceButtons: sourceButtons.length,
+        sourceTitlesHideUrls: [...sourceButtons].every((button) => !(button.getAttribute('title') ?? '').includes('://')),
+        officialBadges: document.querySelectorAll('.official-source-badge').length,
         storageBeforeInteraction,
         remoteLogoChecked: remoteLogoToggle instanceof HTMLInputElement ? remoteLogoToggle.checked : null,
         remoteLogoDisabled: remoteLogoToggle instanceof HTMLInputElement ? remoteLogoToggle.disabled : null,
@@ -351,16 +387,30 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         chinaSearchWorks,
         favoriteToggleWorks,
         searchFilterWorks,
+        officialSourceMarkingCheck,
         gridColumns: layout ? getComputedStyle(layout).gridTemplateColumns : '',
         searchLabel: search?.getAttribute('aria-label') ?? '',
+        resultCountAnnounced: resultCount?.getAttribute('role') === 'status' && resultCount?.getAttribute('aria-live') === 'polite',
+        channelHealthAnnounced: channelHealth?.getAttribute('role') === 'status' && channelHealth?.getAttribute('aria-live') === 'polite',
+        playerStatusAnnounced: playerStatus?.getAttribute('role') === 'status' && playerStatus?.getAttribute('aria-live') === 'polite',
+        announcementRegionReady: announcementRegion?.getAttribute('role') === 'status' && announcementRegion?.getAttribute('aria-live') === 'polite',
+        keyboardHintsComplete: shortcutText.includes('数字选台') && shortcutText.includes('静音') && shortcutText.includes('音量'),
+        focusOutlineVisible,
+        modalOpen,
+        muteShortcutWorks,
+        volumeShortcutWorks,
+        modalShortcutIsolationWorks,
         bridge: typeof window.tvFeed?.loadCatalog === 'function',
         csp: document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute('content') ?? ''
       }
     })()`)
+    await webContents.executeJavaScript(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
+    const image = await webContents.capturePage()
     const result = {
       ...(domResult && typeof domResult === 'object' ? domResult : {}),
       playbackCheck,
       familySafetyCheck,
+      playbackDiagnosticCheck,
       directExternalFetchBlocked: directExternalFetchBlocked === true,
       packaged: app.isPackaged,
       appName: app.getName(),
@@ -377,6 +427,46 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
   } finally {
     setTimeout(() => app.quit(), 100)
   }
+}
+
+async function runPlaybackDiagnosticCheck(webContents: Electron.WebContents): Promise<Record<string, unknown>> {
+  if (process.env.TVFEED_SMOKE_DIAGNOSTIC !== '1') return { attempted: false }
+
+  const navigationSeed: unknown = await webContents.executeJavaScript(`(() => {
+    const selected = () => document.querySelector('[data-channel-selected="true"]')?.getAttribute('data-channel-id') ?? ''
+    const initialChannel = selected()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    const afterArrow = selected()
+    document.querySelector('#stop-player')?.click()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '3', bubbles: true }))
+    return { initialChannel, afterArrow }
+  })()`)
+  const navigation = navigationSeed && typeof navigationSeed === 'object'
+    ? navigationSeed as Record<string, unknown>
+    : {}
+  let state: Record<string, unknown> = { attempted: true, passed: false }
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    const snapshot: unknown = await webContents.executeJavaScript(`(() => {
+      const diagnostic = document.querySelector('#playback-diagnostic')
+      const text = diagnostic?.textContent ?? ''
+      return {
+        code: diagnostic instanceof HTMLElement ? diagnostic.dataset.code ?? '' : '',
+        text,
+        health: document.querySelector('#channel-health')?.textContent ?? '',
+        selectedChannel: document.querySelector('[data-channel-selected="true"]')?.getAttribute('data-channel-id') ?? '',
+        containsSensitiveUrl: /https?:\\/\\/|\\.invalid|(?:token|signature)=/i.test(text)
+      }
+    })()`)
+    state = { attempted: true, ...(snapshot && typeof snapshot === 'object' ? snapshot : {}) }
+    const arrowShortcutWorks = typeof navigation.initialChannel === 'string' && navigation.initialChannel.length > 0 && navigation.afterArrow !== navigation.initialChannel
+    const numericShortcutWorks = typeof state.selectedChannel === 'string' && state.selectedChannel.length > 0 && state.selectedChannel !== navigation.afterArrow
+    if (state.code === 'dns-failure' && state.containsSensitiveUrl === false && arrowShortcutWorks && numericShortcutWorks) {
+      return { ...state, arrowShortcutWorks, numericShortcutWorks, passed: true }
+    }
+  }
+  await webContents.executeJavaScript(`document.querySelector('#stop-player')?.click()`)
+  return { ...state, passed: false }
 }
 
 async function runFamilySafetyCheck(webContents: Electron.WebContents): Promise<Record<string, unknown>> {

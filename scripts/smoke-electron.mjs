@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { rmSync } from 'node:fs'
-import { mkdtemp, readFile, stat, unlink } from 'node:fs/promises'
+import { copyFile, mkdtemp, readFile, stat, unlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -11,6 +11,7 @@ const electronPath = process.env.TVFEED_ELECTRON_PATH || require('electron')
 const screenshotPath = process.env.TVFEED_SMOKE_OUTPUT || join(tmpdir(), 'tv-feed-smoke.png')
 const liveCatalog = process.env.TVFEED_SMOKE_LIVE === '1'
 const playbackRequested = process.env.TVFEED_SMOKE_PLAY === '1'
+const diagnosticRequested = process.env.TVFEED_SMOKE_DIAGNOSTIC === '1'
 const familySafetyRequested = process.env.TVFEED_SMOKE_FAMILY === '1'
 const forcedNetworkFailure = process.env.TVFEED_SMOKE_FORCE_NETWORK_FAILURE === '1'
 const expectedPackaged = process.env.TVFEED_EXPECT_PACKAGED === '1'
@@ -24,6 +25,13 @@ process.once('exit', () => {
 })
 
 await unlink(screenshotPath).catch(() => undefined)
+if (process.env.TVFEED_SMOKE_CATALOG_CACHE) {
+  const cacheInfo = await stat(process.env.TVFEED_SMOKE_CATALOG_CACHE)
+  if (!cacheInfo.isFile() || cacheInfo.size <= 0 || cacheInfo.size > 64 * 1_024 * 1_024) {
+    throw new Error('验收目录缓存不存在或超过 64 MiB 安全上限')
+  }
+  await copyFile(process.env.TVFEED_SMOKE_CATALOG_CACHE, join(smokeUserDataPath, 'catalog-v1.json'))
+}
 
 const childEnvironment = {
   ...process.env,
@@ -68,7 +76,7 @@ child.stderr.on('data', (chunk) => {
   process.stderr.write(chunk)
 })
 
-const timeout = setTimeout(() => child.kill('SIGTERM'), liveCatalog && !forcedNetworkFailure ? 120_000 : 30_000)
+const timeout = setTimeout(() => child.kill('SIGTERM'), liveCatalog && !forcedNetworkFailure ? 390_000 : 30_000)
 const exitCode = await new Promise((resolveExit) => {
   child.once('error', (error) => {
     errorOutput += error.message
@@ -106,6 +114,23 @@ if (checks.rows < 8 || checks.visibleChannelNames < 8 || checks.sourceButtons < 
 if (!checks.favoriteToggleWorks || !checks.searchFilterWorks) {
   throw new Error(`核心交互未通过：${JSON.stringify(checks)}`)
 }
+if (
+  !checks.sourceTitlesHideUrls ||
+  !checks.resultCountAnnounced ||
+  !checks.channelHealthAnnounced ||
+  !checks.playerStatusAnnounced ||
+  !checks.announcementRegionReady ||
+  !checks.keyboardHintsComplete ||
+  !checks.focusOutlineVisible ||
+  (checks.modalOpen
+    ? !checks.modalShortcutIsolationWorks
+    : !checks.muteShortcutWorks || !checks.volumeShortcutWorks)
+) {
+  throw new Error(`键盘或屏幕阅读器验收未通过：${JSON.stringify(checks)}`)
+}
+if (!liveCatalog && checks.officialBadges !== 0) {
+  throw new Error(`离线虚构频道不应显示官方源标记：${JSON.stringify({ officialBadges: checks.officialBadges })}`)
+}
 if (checks.remoteLogoChecked !== false) {
   throw new Error(`远程台标默认状态不安全：${JSON.stringify({ remoteLogoChecked: checks.remoteLogoChecked })}`)
 }
@@ -118,13 +143,16 @@ if (familySafetyRequested && !checks.familySafetyCheck?.passed) {
 if (familySafetyRequested && (checks.remoteLogoDisabled !== true || checks.familySafetyChecked !== true)) {
   throw new Error(`家庭安全模式没有锁定远程台标：${JSON.stringify({ familySafetyChecked: checks.familySafetyChecked, remoteLogoDisabled: checks.remoteLogoDisabled })}`)
 }
+if (diagnosticRequested && !checks.playbackDiagnosticCheck?.passed) {
+  throw new Error(`安全播放诊断验收失败：${JSON.stringify(checks.playbackDiagnosticCheck)}`)
+}
 if (
-  !playbackRequested &&
+  !playbackRequested && !diagnosticRequested &&
   (![null, '[]'].includes(checks.storageBeforeInteraction?.favorites) || ![null, '[]'].includes(checks.storageBeforeInteraction?.recents))
 ) {
   throw new Error(`首次启动包含观看状态：${JSON.stringify(checks.storageBeforeInteraction)}`)
 }
-if (!playbackRequested && checks.noAutoplay !== true) {
+if (!playbackRequested && !diagnosticRequested && checks.noAutoplay !== true) {
   throw new Error(`首次启动发生了自动播放：${JSON.stringify({ noAutoplay: checks.noAutoplay })}`)
 }
 if (forcedNetworkFailure && !checks.catalogState?.startsWith('离线样例')) {
@@ -138,6 +166,9 @@ if (checks.countryOptions?.[1]?.value !== 'CN' || !checks.countryOptions?.[1]?.l
 }
 if (playbackRequested && !checks.playbackCheck?.passed) {
   throw new Error(`真实播放未通过：${JSON.stringify(checks.playbackCheck)}`)
+}
+if (liveCatalog && !checks.officialSourceMarkingCheck?.passed) {
+  throw new Error(`官方源标记验收失败：${JSON.stringify(checks.officialSourceMarkingCheck)}`)
 }
 if (!checks.gridColumns || checks.gridColumns === 'none') throw new Error(`双栏布局未生效：${checks.gridColumns}`)
 
