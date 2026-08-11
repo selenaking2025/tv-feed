@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "license": "MIT",
   "private": true,
+  "packageManager": "npm@11.6.0",
+  "engines": {
+    "node": "24.9.0",
+    "npm": "11.6.0"
+  },
   "description": "Open-source local IPTV player and channel reader that connects directly to third-party sources.",
   "productName": "TV Feed",
   "type": "module",
@@ -11,6 +16,7 @@
     "dev": "electron-vite dev",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
+    "verify:repository": "node scripts/verify-repository-boundaries.mjs",
     "build": "npm run typecheck && npm run test && electron-vite build",
     "preview": "electron-vite preview",
     "smoke": "node scripts/smoke-electron.mjs",
