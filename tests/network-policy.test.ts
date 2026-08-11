@@ -11,6 +11,8 @@ import {
   gunzipBounded,
   parseSystemProxyRules,
   readBoundedBody,
+  SecureConnectionPool,
+  streamBoundedHttps,
   toSecureNetworkError,
   type AddressResolver,
   type PinnedRequestExecutor,
@@ -23,6 +25,26 @@ const FETCH_OPTIONS = {
   maxBytes: 64,
   timeoutMs: 1_000
 } as const
+
+test('HTTPS 连接池只复用同一主机、端口和已验证地址集合', () => {
+  const pool = new SecureConnectionPool(4, 10)
+  const firstTarget = {
+    url: new URL('https://media.example.com/live.m3u8'),
+    hostname: 'media.example.com',
+    addresses: [{ address: '93.184.216.34', family: 4 as const }]
+  }
+  const reboundTarget = {
+    ...firstTarget,
+    addresses: [{ address: '93.184.216.35', family: 4 as const }]
+  }
+
+  const first = pool.directAgent(firstTarget, 0)
+  assert.equal(pool.directAgent(firstTarget, 5), first)
+  assert.notEqual(pool.directAgent(reboundTarget, 6), first)
+  assert.notEqual(pool.directAgent(firstTarget, 20), first)
+  pool.destroy()
+  assert.equal(pool.size, 0)
+})
 
 test('macOS 代理规则只接受 DIRECT、PROXY 和 HTTPS 并保留回退顺序', () => {
   const routes = parseSystemProxyRules('PROXY 127.0.0.1:8080; HTTPS proxy.example.com:8443; DIRECT')
@@ -219,6 +241,87 @@ test('响应正文按流式累计字节执行硬上限', async () => {
   }][0] ?? [])
   await assert.rejects(readBoundedBody(declaredOversized, 8), /声明的大小 9/)
   assert.equal(iterated, false)
+})
+
+test('安全媒体流逐块交付并保留受控响应元数据', async () => {
+  const stream = await streamBoundedHttps('https://media.example.com/segment.ts', {
+    ...FETCH_OPTIONS,
+    maxBytes: 8,
+    rangeStart: 0,
+    rangeEnd: 8
+  }, {
+    resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+    request: async (_target, options) => {
+      assert.equal(options.headers.Range, 'bytes=0-7')
+      return {
+        ...response(206, {
+          'content-length': '8',
+          'content-range': 'bytes 0-7/24',
+          'accept-ranges': 'bytes',
+          'content-type': 'video/mp2t'
+        }, [bytes('1234'), bytes('5678')]),
+        connectionReused: true
+      }
+    }
+  })
+
+  const chunks: string[] = []
+  for await (const chunk of stream.body) chunks.push(new TextDecoder().decode(chunk))
+  assert.deepEqual(chunks, ['1234', '5678'])
+  assert.equal(stream.contentLength, 8)
+  assert.equal(stream.contentRange, 'bytes 0-7/24')
+  assert.equal(stream.acceptRanges, 'bytes')
+  assert.equal(stream.connectionReused, true)
+})
+
+test('安全媒体流在传输途中超过上限会立即销毁响应', async () => {
+  let destroyed = false
+  const stream = await streamBoundedHttps('https://media.example.com/segment.ts', {
+    ...FETCH_OPTIONS,
+    maxBytes: 8
+  }, {
+    resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+    request: async () => response(200, {}, [bytes('1234'), bytes('56789')], () => {
+      destroyed = true
+    })
+  })
+
+  await assert.rejects(async () => {
+    for await (const _chunk of stream.body) {
+      // Consume until the byte ceiling terminates the stream.
+    }
+  }, /超过 8 字节安全上限/)
+  assert.equal(destroyed, true)
+})
+
+test('取消安全媒体流会中止尚未完成的正文并释放响应', async () => {
+  const controller = new AbortController()
+  let destroyed = false
+  const stream = await streamBoundedHttps('https://media.example.com/segment.ts', {
+    ...FETCH_OPTIONS,
+    signal: controller.signal
+  }, {
+    resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+    request: async (_target, options) => response(200, {}, {
+      async *[Symbol.asyncIterator](): AsyncGenerator<Uint8Array> {
+        yield bytes('first')
+        await new Promise<void>((_resolve, reject) => {
+          if (options.signal?.aborted) {
+            reject(options.signal.reason)
+            return
+          }
+          options.signal?.addEventListener('abort', () => reject(options.signal?.reason), { once: true })
+        })
+      }
+    }, () => {
+      destroyed = true
+    })
+  })
+  const iterator = stream.body[Symbol.asyncIterator]()
+  assert.equal(new TextDecoder().decode((await iterator.next()).value), 'first')
+  controller.abort(new Error('test cancel'))
+  await assert.rejects(iterator.next(), /test cancel/)
+  assert.equal(destroyed, true)
 })
 
 test('gzip 的压缩正文和解压后正文分别受硬上限约束', async () => {

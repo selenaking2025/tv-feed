@@ -40,6 +40,12 @@ test('渲染进程网络门禁拒绝直接 fetch 并要求 CSP 和远程台标�
   ])
   assert.deepEqual(findRendererBoundaryViolations(safeEntries), [])
 
+  safeEntries.set('src/renderer/src/secure-hls-loader.ts', 'window.fetch(streamUrl, { redirect: "error" })')
+  assert.deepEqual(findRendererBoundaryViolations(safeEntries), [])
+  safeEntries.set('src/renderer/src/secure-hls-loader.ts', 'window.fetch(userProvidedUrl)')
+  assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /不得直接使用 fetch/)
+  safeEntries.delete('src/renderer/src/secure-hls-loader.ts')
+
   safeEntries.set('src/renderer/src/main.ts', `let familySafetyEnabled = readStoredBoolean(FAMILY_SAFETY_KEY)\nlet remoteLogosEnabled = !familySafetyEnabled && readStoredBoolean(REMOTE_LOGOS_KEY)\nfunction readStoredBoolean(key) { return localStorage.getItem(key) === 'true' }`)
   assert.deepEqual(findRendererBoundaryViolations(safeEntries), [])
 

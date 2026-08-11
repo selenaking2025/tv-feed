@@ -68,7 +68,8 @@ export async function fetchRemoteResource(
     body: result.body,
     contentType,
     finalUrl: result.finalUrl,
-    statusCode: result.statusCode
+    statusCode: result.statusCode,
+    connectionReused: result.connectionReused
   }
 }
 

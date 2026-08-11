@@ -17,7 +17,8 @@ test('HLS 播放列表、JSON、分片/密钥和 Logo 全部经过同一个安�
       body: bodyFor(kind),
       contentType: kind === 'hls-json' ? 'application/json' : 'application/octet-stream',
       finalUrl: url,
-      statusCode: 200
+      statusCode: 200,
+      connectionReused: false
     }
   }
 
@@ -46,7 +47,8 @@ test('远程播放列表必须是 HLS，远程 Logo 必须是安全位图', asyn
     body: new TextEncoder().encode('<html>not hls</html>'),
     contentType: 'text/html',
     finalUrl: 'https://media.example.com/manifest',
-    statusCode: 200
+    statusCode: 200,
+    connectionReused: false
   })
   await assert.rejects(
     fetchRemoteResource(request('hls-playlist'), new AbortController().signal, invalidPlaylist),
@@ -57,7 +59,8 @@ test('远程播放列表必须是 HLS，远程 Logo 必须是安全位图', asyn
     body: new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
     contentType: 'image/svg+xml',
     finalUrl: 'https://media.example.com/logo.svg',
-    statusCode: 200
+    statusCode: 200,
+    connectionReused: false
   })
   await assert.rejects(
     fetchRemoteResource(request('logo'), new AbortController().signal, svgLogo),

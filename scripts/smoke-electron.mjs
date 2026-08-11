@@ -11,6 +11,7 @@ const electronPath = process.env.TVFEED_ELECTRON_PATH || require('electron')
 const screenshotPath = process.env.TVFEED_SMOKE_OUTPUT || join(tmpdir(), 'tv-feed-smoke.png')
 const liveCatalog = process.env.TVFEED_SMOKE_LIVE === '1'
 const playbackRequested = process.env.TVFEED_SMOKE_PLAY === '1'
+const playbackObservationMs = Number(process.env.TVFEED_SMOKE_PLAY_OBSERVE_MS || 30_000)
 const diagnosticRequested = process.env.TVFEED_SMOKE_DIAGNOSTIC === '1'
 const familySafetyRequested = process.env.TVFEED_SMOKE_FAMILY === '1'
 const forcedNetworkFailure = process.env.TVFEED_SMOKE_FORCE_NETWORK_FAILURE === '1'
@@ -82,7 +83,12 @@ child.stderr.on('data', (chunk) => {
   process.stderr.write(chunk)
 })
 
-const timeout = setTimeout(() => child.kill('SIGTERM'), liveCatalog && !forcedNetworkFailure ? 390_000 : 30_000)
+const smokeTimeoutMs = liveCatalog && !forcedNetworkFailure
+  ? 390_000
+  : playbackRequested
+    ? 150_000
+    : 30_000
+const timeout = setTimeout(() => child.kill('SIGTERM'), smokeTimeoutMs)
 const exitCode = await new Promise((resolveExit) => {
   child.once('error', (error) => {
     errorOutput += error.message
@@ -209,6 +215,13 @@ if (checks.countryOptions?.[1]?.value !== 'CN' || !checks.countryOptions?.[1]?.l
 }
 if (playbackRequested && !checks.playbackCheck?.passed) {
   throw new Error(`真实播放未通过：${JSON.stringify(checks.playbackCheck)}`)
+}
+if (
+  playbackRequested &&
+  playbackObservationMs >= 15_000 &&
+  (!checks.sourceHealthSummary?.present || checks.sourceHealthSummary.records < 1 || checks.sourceHealthSummary.containsUrl)
+) {
+  throw new Error(`线路稳定记录未通过：${JSON.stringify(checks.sourceHealthSummary)}`)
 }
 if (liveCatalog && !checks.officialSourceMarkingCheck?.passed) {
   throw new Error(`官方源标记验收失败：${JSON.stringify(checks.officialSourceMarkingCheck)}`)

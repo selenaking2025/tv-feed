@@ -37,18 +37,35 @@ test('hls.js 的 0/0 表示完整资源，只有正向有效区间才进入 IPC 
   assert.throws(() => resourceRange({ rangeEnd: 100 }), /字节范围无效/)
 })
 
-test('安全 HLS Loader 不直接联网，所有上下文都经 preload 桥请求主进程', async () => {
-  const requests: RemoteResourceRequest[] = []
+test('安全 HLS Loader 让小资源走 IPC、大分片只读取一次性应用内流', async () => {
+  const bufferedRequests: RemoteResourceRequest[] = []
+  const streamRequests: RemoteResourceRequest[] = []
+  const fetchedUrls: string[] = []
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
     value: {
       setTimeout,
       clearTimeout,
+      fetch: async (url: string): Promise<Response> => {
+        fetchedUrls.push(url)
+        return new Response(Uint8Array.from([1, 2, 3, 4]), {
+          status: 200,
+          headers: {
+            'content-length': '4',
+            'content-type': 'video/mp2t',
+            'x-tvfeed-connection-reused': '1'
+          }
+        })
+      },
       tvFeed: {
         fetchRemoteResource: async (request: RemoteResourceRequest): Promise<RemoteResourceResponse> => {
-          requests.push(request)
+          bufferedRequests.push(request)
           return responseFor(request)
+        },
+        prepareRemoteResourceStream: async (request: RemoteResourceRequest) => {
+          streamRequests.push(request)
+          return { streamUrl: 'tvfeed://app/__hls_stream/abcdefghijklmnopqrstuvwxyz_123456' }
         },
         cancelRemoteResource: () => undefined
       }
@@ -68,8 +85,10 @@ test('安全 HLS Loader 不直接联网，所有上下文都经 preload 桥请�
     assert.match(String(playlist.data), /^#EXTM3U/)
     assert.deepEqual(metadata.data, { ok: true })
     assert.ok(binary.data instanceof ArrayBuffer)
-    assert.deepEqual(requests.map((request) => request.kind), ['hls-playlist', 'hls-json', 'hls-binary'])
-    assert.deepEqual(requests[2] && { start: requests[2].rangeStart, end: requests[2].rangeEnd }, { start: 100, end: 200 })
+    assert.deepEqual(bufferedRequests.map((request) => request.kind), ['hls-playlist', 'hls-json'])
+    assert.deepEqual(streamRequests.map((request) => request.kind), ['hls-binary'])
+    assert.deepEqual(streamRequests[0] && { start: streamRequests[0].rangeStart, end: streamRequests[0].rangeEnd }, { start: 100, end: 200 })
+    assert.deepEqual(fetchedUrls, ['tvfeed://app/__hls_stream/abcdefghijklmnopqrstuvwxyz_123456'])
   } finally {
     if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
     else Reflect.deleteProperty(globalThis, 'window')
@@ -88,6 +107,9 @@ test('切台或销毁 Loader 会取消尚未完成的主进程请求并忽略迟
       tvFeed: {
         fetchRemoteResource: () => new Promise<RemoteResourceResponse>((resolve) => {
           resolveRemote = resolve
+        }),
+        prepareRemoteResourceStream: async () => ({
+          streamUrl: 'tvfeed://app/__hls_stream/abcdefghijklmnopqrstuvwxyz_123456'
         }),
         cancelRemoteResource: (requestId: string) => cancelled.push(requestId)
       }
@@ -110,6 +132,63 @@ test('切台或销毁 Loader 会取消尚未完成的主进程请求并忽略迟
     resolveRemote?.(responseFor({ requestId: 'late', url: 'https://media.example.com/live.m3u8', kind: 'hls-playlist' }))
     await Promise.resolve()
     assert.equal(succeeded, false)
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else Reflect.deleteProperty(globalThis, 'window')
+  }
+})
+
+test('二进制安全媒体流逐块触发进度回调，不在 Loader 中重新拼成整片', async () => {
+  const progress: number[][] = []
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      setTimeout,
+      clearTimeout,
+      fetch: async (): Promise<Response> => new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(Uint8Array.from([1, 2]))
+          controller.enqueue(Uint8Array.from([3, 4]))
+          controller.close()
+        }
+      }), {
+        status: 200,
+        headers: {
+          'content-length': '4',
+          'content-type': 'video/mp2t',
+          'x-tvfeed-connection-reused': '1'
+        }
+      }),
+      tvFeed: {
+        fetchRemoteResource: async () => assert.fail('binary stream must not use buffered IPC'),
+        prepareRemoteResourceStream: async () => ({
+          streamUrl: 'tvfeed://app/__hls_stream/abcdefghijklmnopqrstuvwxyz_123456'
+        }),
+        cancelRemoteResource: () => undefined
+      }
+    }
+  })
+
+  try {
+    const loader = new SecureHlsLoader({} as HlsConfig)
+    const response = await new Promise<LoaderResponse>((resolve, reject) => {
+      loader.load({ url: 'https://media.example.com/segment.ts', responseType: 'arraybuffer' }, {
+        ...LOADER_CONFIGURATION,
+        highWaterMark: 3
+      }, {
+        onProgress: (_stats, _context, data) => progress.push([...new Uint8Array(data as ArrayBuffer)]),
+        onSuccess: (result, stats, _context, networkDetails) => {
+          assert.equal(stats.loaded, 4)
+          assert.equal((networkDetails as { connectionReused?: boolean }).connectionReused, true)
+          resolve(result)
+        },
+        onError: (error) => reject(new Error(error.text)),
+        onTimeout: () => reject(new Error('loader timed out'))
+      })
+    })
+    assert.deepEqual(progress, [[1, 2, 3, 4]])
+    assert.equal((response.data as ArrayBuffer).byteLength, 0)
   } finally {
     if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
     else Reflect.deleteProperty(globalThis, 'window')

@@ -2,14 +2,21 @@ import { app, BrowserWindow, ipcMain, protocol, session } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { RemoteResourceRequest } from '../shared/contracts.ts'
+import { evaluatePlaybackContinuity } from '../shared/playback-metrics.ts'
 import { clearCatalogCache, loadCatalog, loadOfflineDemo, toCatalogLoadFailure } from './catalog-service.ts'
+import { OneTimeTicketRegistry } from './one-time-ticket-registry.ts'
 import { fetchRemoteResource, validateRemoteResourceRequest } from './remote-resource-service.ts'
-import { configureSystemProxyResolver } from './secure-network.ts'
+import { streamRemoteResource, validateRemoteStreamRequest } from './remote-resource-stream.ts'
+import { configureSystemProxyResolver, destroySecureConnections } from './secure-network.ts'
 
 const APP_SCHEME = 'tvfeed'
 const APP_HOST = 'app'
-const CONTENT_SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+const CONTENT_SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob: tvfeed:; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 const MAX_CONCURRENT_REMOTE_FETCHES = 8
+const REMOTE_STREAM_PATH_PREFIX = '/__hls_stream/'
+const REMOTE_STREAM_TICKET_TTL_MS = 15_000
+const MAX_REMOTE_STREAM_TICKETS = 128
 
 if (process.env.TVFEED_SMOKE_OUTPUT && process.env.TVFEED_SMOKE_USER_DATA) {
   app.setPath('userData', process.env.TVFEED_SMOKE_USER_DATA)
@@ -30,7 +37,26 @@ protocol.registerSchemesAsPrivileged([
 
 let mainWindow: BrowserWindow | null = null
 let smokeHandled = false
-const remoteFetches = new Map<string, { controller: AbortController; senderId: number }>()
+interface ActiveRemoteFetch {
+  controller: AbortController
+  senderId: number
+  mode: 'buffered' | 'stream-pending' | 'streaming'
+  streamToken: string
+}
+
+interface RemoteStreamTicketEntry {
+  controller: AbortController
+  key: string
+  request: RemoteResourceRequest & { kind: 'hls-binary' }
+  senderId: number
+}
+
+const remoteFetches = new Map<string, ActiveRemoteFetch>()
+const remoteStreamTickets = new OneTimeTicketRegistry<RemoteStreamTicketEntry>(
+  REMOTE_STREAM_TICKET_TTL_MS,
+  MAX_REMOTE_STREAM_TICKETS
+)
+let remoteStreamSweepTimer: ReturnType<typeof setInterval> | undefined
 
 if (process.env.TVFEED_SMOKE_PLAY === '1') {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
@@ -39,6 +65,7 @@ if (process.env.TVFEED_SMOKE_PLAY === '1') {
 app.whenReady().then(async () => {
   await registerAppProtocol()
   configureSystemProxyResolver((url) => session.defaultSession.resolveProxy(url))
+  remoteStreamSweepTimer = setInterval(expireRemoteStreamTickets, 5_000)
   hardenSession()
   registerIpc()
   createMainWindow()
@@ -50,6 +77,15 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin' || process.env.TVFEED_SMOKE_OUTPUT) app.quit()
+})
+
+app.on('before-quit', () => {
+  if (remoteStreamSweepTimer !== undefined) clearInterval(remoteStreamSweepTimer)
+  remoteStreamSweepTimer = undefined
+  for (const request of remoteFetches.values()) request.controller.abort(new Error('应用正在退出'))
+  remoteFetches.clear()
+  remoteStreamTickets.clear()
+  destroySecureConnections()
 })
 
 function createMainWindow(): void {
@@ -166,6 +202,7 @@ function registerIpc(): void {
     assertTrustedSender(event.senderFrame?.url ?? '')
     const request = validateRemoteResourceRequest(input)
     const senderId = event.sender.id
+    expireRemoteStreamTickets()
     if (countRemoteFetches(senderId) >= MAX_CONCURRENT_REMOTE_FETCHES) {
       throw new Error(`同时进行的远程资源请求不能超过 ${MAX_CONCURRENT_REMOTE_FETCHES} 个`)
     }
@@ -173,17 +210,38 @@ function registerIpc(): void {
     if (remoteFetches.has(key)) throw new Error('远程资源请求 ID 已在使用')
 
     const controller = new AbortController()
-    remoteFetches.set(key, { controller, senderId })
+    remoteFetches.set(key, { controller, senderId, mode: 'buffered', streamToken: '' })
     try {
       return await fetchRemoteResource(request, controller.signal)
     } finally {
-      remoteFetches.delete(key)
+      finishRemoteFetch(key, controller)
     }
+  })
+  ipcMain.handle('remote-resource:prepare-stream', (event, input: unknown) => {
+    assertTrustedSender(event.senderFrame?.url ?? '')
+    const request = validateRemoteStreamRequest(input)
+    const senderId = event.sender.id
+    expireRemoteStreamTickets()
+    if (countRemoteFetches(senderId) >= MAX_CONCURRENT_REMOTE_FETCHES) {
+      throw new Error(`同时进行的远程资源请求不能超过 ${MAX_CONCURRENT_REMOTE_FETCHES} 个`)
+    }
+    const key = remoteFetchKey(senderId, request.requestId)
+    if (remoteFetches.has(key)) throw new Error('远程资源请求 ID 已在使用')
+
+    const controller = new AbortController()
+    const issued = remoteStreamTickets.issue({ controller, key, request, senderId })
+    remoteFetches.set(key, {
+      controller,
+      senderId,
+      mode: 'stream-pending',
+      streamToken: issued.token
+    })
+    return { streamUrl: `${APP_SCHEME}://${APP_HOST}${REMOTE_STREAM_PATH_PREFIX}${issued.token}` }
   })
   ipcMain.on('remote-resource:cancel', (event, requestId: unknown) => {
     assertTrustedSender(event.senderFrame?.url ?? '')
     if (typeof requestId !== 'string' || !/^[A-Za-z0-9:_-]{1,128}$/.test(requestId)) return
-    remoteFetches.get(remoteFetchKey(event.sender.id, requestId))?.controller.abort(new Error('远程资源请求已取消'))
+    cancelRemoteFetch(remoteFetchKey(event.sender.id, requestId), new Error('远程资源请求已取消'))
   })
   ipcMain.handle('app:version', (event) => {
     assertTrustedSender(event.senderFrame?.url ?? '')
@@ -285,8 +343,30 @@ function remoteFetchKey(senderId: number, requestId: string): string {
   return `${senderId}:${requestId}`
 }
 
+function finishRemoteFetch(key: string, controller: AbortController): void {
+  if (remoteFetches.get(key)?.controller === controller) remoteFetches.delete(key)
+}
+
+function cancelRemoteFetch(key: string, reason: Error): void {
+  const active = remoteFetches.get(key)
+  if (!active) return
+  active.controller.abort(reason)
+  if (active.mode === 'stream-pending') {
+    if (active.streamToken) remoteStreamTickets.revoke(active.streamToken)
+  }
+  if (active.mode !== 'buffered') finishRemoteFetch(key, active.controller)
+}
+
+function expireRemoteStreamTickets(): void {
+  for (const entry of remoteStreamTickets.sweep()) {
+    entry.controller.abort(new Error('安全媒体流票据已过期'))
+    finishRemoteFetch(entry.key, entry.controller)
+  }
+}
+
 function abortRemoteFetches(senderId: number | undefined): void {
   if (senderId === undefined) return
+  remoteStreamTickets.removeWhere((entry) => entry.senderId === senderId)
   for (const [key, request] of remoteFetches) {
     if (request.senderId === senderId) {
       request.controller.abort(new Error('渲染进程已结束'))
@@ -296,13 +376,15 @@ function abortRemoteFetches(senderId: number | undefined): void {
 }
 
 async function registerAppProtocol(): Promise<void> {
-  if (process.env.ELECTRON_RENDERER_URL) return
-
   const rendererRoot = resolve(fileURLToPath(new URL('../renderer/', import.meta.url)))
   protocol.handle(APP_SCHEME, async (request) => {
     try {
       const url = new URL(request.url)
       if (url.hostname !== APP_HOST) return new Response('Not found', { status: 404 })
+      if (url.pathname.startsWith(REMOTE_STREAM_PATH_PREFIX)) {
+        return handleRemoteStreamRequest(request, url)
+      }
+      if (process.env.ELECTRON_RENDERER_URL) return new Response('Not found', { status: 404 })
       const requestPath = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname)
       const absolutePath = resolve(rendererRoot, `.${requestPath}`)
       if (absolutePath !== rendererRoot && !absolutePath.startsWith(`${rendererRoot}${sep}`)) {
@@ -321,6 +403,117 @@ async function registerAppProtocol(): Promise<void> {
       return new Response('Not found', { status: 404 })
     }
   })
+}
+
+async function handleRemoteStreamRequest(request: Request, url: URL): Promise<Response> {
+  const corsHeaders = remoteStreamCorsHeaders(request)
+  if (!isTrustedRemoteStreamRequest(request) || url.search || url.hash) {
+    return new Response('Forbidden', { status: 403, headers: corsHeaders })
+  }
+  const token = url.pathname.slice(REMOTE_STREAM_PATH_PREFIX.length)
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(token)) {
+    return new Response('Not found', { status: 404, headers: corsHeaders })
+  }
+
+  expireRemoteStreamTickets()
+  const entry = remoteStreamTickets.consume(token)
+  if (!entry) return new Response('Not found', { status: 404, headers: corsHeaders })
+  const active = remoteFetches.get(entry.key)
+  if (
+    !active ||
+    active.controller !== entry.controller ||
+    active.senderId !== entry.senderId ||
+    active.mode !== 'stream-pending' ||
+    active.streamToken !== token
+  ) {
+    entry.controller.abort(new Error('安全媒体流票据状态不一致'))
+    finishRemoteFetch(entry.key, entry.controller)
+    return new Response('Not found', { status: 404, headers: corsHeaders })
+  }
+  active.mode = 'streaming'
+  active.streamToken = ''
+
+  try {
+    const result = await streamRemoteResource(entry.request, entry.controller.signal)
+    const iterator = result.body[Symbol.asyncIterator]()
+    let finished = false
+    const finish = (): void => {
+      if (finished) return
+      finished = true
+      finishRemoteFetch(entry.key, entry.controller)
+    }
+    const body = new ReadableStream<Uint8Array>({
+      pull: async (controller) => {
+        try {
+          const next = await iterator.next()
+          if (next.done) {
+            finish()
+            controller.close()
+            return
+          }
+          controller.enqueue(next.value)
+        } catch {
+          finish()
+          controller.error(new Error('安全媒体流传输中断'))
+        }
+      },
+      cancel: async () => {
+        entry.controller.abort(new Error('安全媒体流消费已取消'))
+        try {
+          await iterator.return?.()
+        } finally {
+          finish()
+        }
+      }
+    })
+    const headers = new Headers(corsHeaders)
+    headers.set('Cache-Control', 'no-store')
+    headers.set('Content-Type', result.contentType || 'application/octet-stream')
+    headers.set('X-Content-Type-Options', 'nosniff')
+    headers.set('X-TVFeed-Connection-Reused', result.connectionReused ? '1' : '0')
+    headers.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, X-TVFeed-Connection-Reused')
+    if (result.contentLength !== null) headers.set('Content-Length', String(result.contentLength))
+    if (result.contentRange) headers.set('Content-Range', result.contentRange)
+    if (result.acceptRanges) headers.set('Accept-Ranges', result.acceptRanges)
+    return new Response(body, { status: result.statusCode, headers })
+  } catch {
+    finishRemoteFetch(entry.key, entry.controller)
+    return new Response('安全媒体流无法建立', {
+      status: 502,
+      headers: {
+        ...corsHeaders,
+        'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8',
+        'X-Content-Type-Options': 'nosniff'
+      }
+    })
+  }
+}
+
+function isTrustedRemoteStreamRequest(request: Request): boolean {
+  const developmentUrl = process.env.ELECTRON_RENDERER_URL
+  if (!developmentUrl) return true
+  try {
+    const expectedOrigin = new URL(developmentUrl).origin
+    const origin = request.headers.get('origin')
+    if (origin === expectedOrigin) return true
+    return Boolean(request.referrer && new URL(request.referrer).origin === expectedOrigin)
+  } catch {
+    return false
+  }
+}
+
+function remoteStreamCorsHeaders(request: Request): Record<string, string> {
+  const developmentUrl = process.env.ELECTRON_RENDERER_URL
+  if (!developmentUrl) return {}
+  try {
+    const expectedOrigin = new URL(developmentUrl).origin
+    return request.headers.get('origin') === expectedOrigin
+      ? { 'Access-Control-Allow-Origin': expectedOrigin, Vary: 'Origin' }
+      : {}
+  } catch {
+    return {}
+  }
 }
 
 function isTrustedRendererUrl(url: string): boolean {
@@ -386,6 +579,20 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
       const announcementRegion = document.querySelector('#announcement-region')
       const shortcutText = document.querySelector('.shortcut-strip')?.textContent ?? ''
       const favorite = document.querySelector('#favorite-channel')
+      let sourceHealthSummary = { present: false, records: 0, containsUrl: false }
+      const sourceHealthRaw = localStorage.getItem('tvfeed:source-health:v1')
+      if (sourceHealthRaw) {
+        try {
+          const parsed = JSON.parse(sourceHealthRaw)
+          sourceHealthSummary = {
+            present: true,
+            records: Array.isArray(parsed?.records) ? parsed.records.length : 0,
+            containsUrl: sourceHealthRaw.includes('://')
+          }
+        } catch {
+          sourceHealthSummary = { present: true, records: -1, containsUrl: true }
+        }
+      }
       const storageBeforeInteraction = {
         favorites: localStorage.getItem('tvfeed:favorites:v1'),
         recents: localStorage.getItem('tvfeed:recents:v1'),
@@ -523,6 +730,7 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         sourceTitlesHideUrls: [...sourceButtons].every((button) => !(button.getAttribute('title') ?? '').includes('://')),
         officialBadges: document.querySelectorAll('.official-source-badge').length,
         storageBeforeInteraction,
+        sourceHealthSummary,
         remoteLogoChecked: remoteLogoToggle instanceof HTMLInputElement ? remoteLogoToggle.checked : null,
         remoteLogoDisabled: remoteLogoToggle instanceof HTMLInputElement ? remoteLogoToggle.disabled : null,
         familySafetyChecked: familySafetyToggle instanceof HTMLInputElement ? familySafetyToggle.checked : null,
@@ -831,23 +1039,89 @@ async function runPlaybackCheck(webContents: Electron.WebContents): Promise<Reco
 
   for (let attempt = 0; attempt < 40; attempt += 1) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 500))
-    const snapshot: unknown = await webContents.executeJavaScript(`(() => {
-      const video = document.querySelector('video')
-      if (!(video instanceof HTMLVideoElement)) return { readyState: -1, paused: true, width: 0, height: 0 }
-      return {
-        readyState: video.readyState,
-        paused: video.paused,
-        width: video.videoWidth,
-        height: video.videoHeight,
-        currentProtocol: video.currentSrc ? new URL(video.currentSrc).protocol : '',
-        status: document.querySelector('#player-status-text')?.textContent ?? ''
-      }
-    })()`)
+    const snapshot = await readPlaybackSnapshot(webContents)
     state = { attempted: true, ...(snapshot && typeof snapshot === 'object' ? snapshot : {}) }
     const readyState = Number(state.readyState ?? -1)
     const width = Number(state.width ?? 0)
-    if (readyState >= 2 && state.paused === false && width > 0) return { ...state, passed: true }
+    if (readyState >= 2 && state.paused === false && width > 0) break
   }
 
-  return { ...state, passed: false }
+  if (Number(state.readyState ?? -1) < 2 || state.paused !== false || Number(state.width ?? 0) <= 0) {
+    return { ...state, passed: false, reasons: ['播放器未在 20 秒内完成起播'] }
+  }
+
+  const baselineMetrics = recordValue(state.metrics)
+  const startedMediaAdvancedSeconds = finiteSmokeNumber(baselineMetrics.mediaAdvancedSeconds)
+  const startedStallDurationMs = finiteSmokeNumber(baselineMetrics.stallDurationMs)
+  const startedDroppedFrames = finiteSmokeNumber(baselineMetrics.droppedFrames)
+  const startedTotalFrames = finiteSmokeNumber(baselineMetrics.totalFrames)
+  const observationTargetMs = smokePlaybackObservationMs()
+  const observationStartedAt = Date.now()
+
+  while (Date.now() - observationStartedAt < observationTargetMs) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500))
+    const snapshot = await readPlaybackSnapshot(webContents)
+    state = { attempted: true, ...(snapshot && typeof snapshot === 'object' ? snapshot : {}) }
+  }
+
+  const observationMs = Date.now() - observationStartedAt
+  const finalMetrics = recordValue(state.metrics)
+  const continuity = evaluatePlaybackContinuity({
+    startedCurrentTime: startedMediaAdvancedSeconds,
+    endedCurrentTime: finiteSmokeNumber(finalMetrics.mediaAdvancedSeconds),
+    observationMs,
+    stallDurationMs: Math.max(0, finiteSmokeNumber(finalMetrics.stallDurationMs) - startedStallDurationMs),
+    droppedFrames: Math.max(0, finiteSmokeNumber(finalMetrics.droppedFrames) - startedDroppedFrames),
+    totalFrames: Math.max(0, finiteSmokeNumber(finalMetrics.totalFrames) - startedTotalFrames),
+    readyState: finiteSmokeNumber(state.readyState, -1),
+    paused: state.paused !== false,
+    width: finiteSmokeNumber(state.width)
+  })
+
+  return {
+    ...state,
+    observationMs,
+    continuity,
+    passed: continuity.passed
+  }
+}
+
+async function readPlaybackSnapshot(webContents: Electron.WebContents): Promise<unknown> {
+  return webContents.executeJavaScript(`(() => {
+    const video = document.querySelector('video')
+    if (!(video instanceof HTMLVideoElement)) {
+      return { readyState: -1, paused: true, width: 0, height: 0, currentTime: 0, metrics: {} }
+    }
+    let metrics = {}
+    try {
+      metrics = JSON.parse(video.dataset.playbackMetrics ?? '{}')
+    } catch {}
+    let currentProtocol = ''
+    try {
+      currentProtocol = video.currentSrc ? new URL(video.currentSrc).protocol : ''
+    } catch {}
+    return {
+      readyState: video.readyState,
+      paused: video.paused,
+      width: video.videoWidth,
+      height: video.videoHeight,
+      currentTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+      currentProtocol,
+      metrics,
+      status: document.querySelector('#player-status-text')?.textContent ?? ''
+    }
+  })()`)
+}
+
+function smokePlaybackObservationMs(): number {
+  const parsed = Number(process.env.TVFEED_SMOKE_PLAY_OBSERVE_MS ?? 30_000)
+  return Number.isFinite(parsed) ? Math.min(180_000, Math.max(10_000, Math.round(parsed))) : 30_000
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+}
+
+function finiteSmokeNumber(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }

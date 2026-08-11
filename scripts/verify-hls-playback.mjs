@@ -17,6 +17,7 @@ const child = spawn(process.execPath, ['scripts/smoke-electron.mjs'], {
     ...process.env,
     TVFEED_SMOKE_ACCEPTANCE_URL: source.url,
     TVFEED_SMOKE_PLAY: '1',
+    TVFEED_SMOKE_PLAY_OBSERVE_MS: process.env.TVFEED_SMOKE_PLAY_OBSERVE_MS || '60000',
     TVFEED_SMOKE_OUTPUT: outputPath
   },
   stdio: ['ignore', 'pipe', 'pipe']

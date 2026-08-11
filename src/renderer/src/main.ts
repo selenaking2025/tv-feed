@@ -17,6 +17,14 @@ import type {
 import { displayCountryName, getCountrySearchAliases, sortCountriesForDisplay } from '../../shared/countries.ts'
 import { hasVerifiedOfficialSource, isVerifiedOfficialSource } from '../../shared/official-sources.ts'
 import type { PlaybackDiagnostic } from '../../shared/playback-diagnostics.ts'
+import type { PlaybackMetricsSnapshot } from '../../shared/playback-metrics.ts'
+import {
+  parseSourceHealthStore,
+  rankSources,
+  recordSourceFailure,
+  recordSourceSuccess,
+  serializeSourceHealthStore
+} from '../../shared/source-health.ts'
 import { StreamPlayer, type PlaybackState } from './player.ts'
 
 type ViewMode = 'all' | 'chinese' | 'favorites' | 'recent'
@@ -28,6 +36,7 @@ const RECENTS_KEY = 'tvfeed:recents:v1'
 const LAST_CHANNEL_KEY = 'tvfeed:last-channel:v1'
 const REMOTE_LOGOS_KEY = 'tvfeed:remote-logos:v1'
 const FAMILY_SAFETY_KEY = 'tvfeed:family-safety:v1'
+const SOURCE_HEALTH_KEY = 'tvfeed:source-health:v1'
 const CHINESE_REGIONS = new Set(['CN', 'HK', 'TW', 'MO'])
 const MAX_CONCURRENT_LOGO_REQUESTS = 4
 const MAX_PENDING_LOGO_REQUESTS = 64
@@ -101,7 +110,9 @@ let activeSourceIndex = 0
 let viewMode: ViewMode = 'all'
 let favorites = new Set(readStoredArray(FAVORITES_KEY))
 let recents = readStoredArray(RECENTS_KEY)
+let sourceHealthRecords = readStoredSourceHealth()
 let failedSources = new Set<string>()
+let healthRecordedForLoad = false
 let refreshInProgress = false
 let catalogSyncActive = false
 let familySafetyEnabled = readStoredBoolean(FAMILY_SAFETY_KEY)
@@ -119,7 +130,8 @@ const activeLogoObjectUrls = new Set<string>()
 
 const player = new StreamPlayer(elements.video, {
   onState: updatePlaybackState,
-  onFatal: handleFatalSource
+  onFatal: handleFatalSource,
+  onMetrics: handlePlaybackMetrics
 })
 
 bindEvents()
@@ -404,7 +416,7 @@ function selectChannel(channelId: string, autoplay: boolean, rememberRecent: boo
   const channel = getChannel(channelId)
   if (!channel) return
   selectedChannelId = channel.id
-  activeSourceIndex = 0
+  activeSourceIndex = preferredSource(channel)?.index ?? 0
   failedSources = new Set()
   writeStoredString(LAST_CHANNEL_KEY, channel.id)
 
@@ -416,7 +428,8 @@ function selectChannel(channelId: string, autoplay: boolean, rememberRecent: boo
   if (!autoplay) updateChannelHealth('not-checked')
   announce(`已选择频道 ${channel.name}`)
 
-  if (autoplay && channel.sources[0]) playSource(channel.sources[0], 0)
+  const preferred = preferredSource(channel)
+  if (autoplay && preferred) playSource(preferred.source, preferred.index)
   if (window.innerWidth <= 1040 && autoplay) closeSidebar()
 }
 
@@ -437,7 +450,7 @@ function renderChannelDetail(channel: CatalogChannel): void {
   elements.detailLogo.replaceWith(createDetailLogo(channel))
   elements.detailLogo = required<HTMLElement>('#detail-logo')
   updateFavoriteButton()
-  elements.sourceHelp.textContent = `${channel.sources.length} 条浏览器兼容线路；当前线路失败时自动切换。`
+  elements.sourceHelp.textContent = `${channel.sources.length} 条浏览器兼容线路；根据本机播放结果优先稳定线路，失败时自动切换。`
 }
 
 function createDetailLogo(channel: CatalogChannel): HTMLElement {
@@ -549,6 +562,7 @@ function enforceFamilyLocalState(): void {
   selectedChannelId = ''
   removeStoredValue(RECENTS_KEY)
   removeStoredValue(LAST_CHANNEL_KEY)
+  clearSourceHealthRecords()
   player.stop()
 }
 
@@ -655,11 +669,12 @@ function clearViewingDataFromSettings(): void {
   removeStoredValue(FAVORITES_KEY)
   removeStoredValue(RECENTS_KEY)
   removeStoredValue(LAST_CHANNEL_KEY)
+  clearSourceHealthRecords()
   updateFavoriteButton()
   if (viewMode === 'favorites' || viewMode === 'recent') applyFilters()
   else renderVirtualRows()
 
-  const message = '收藏、最近观看和上次频道记录已从本机清除。'
+  const message = '收藏、最近观看、上次频道和线路稳定记录已从本机清除。'
   setPrivacyStatus(message)
   showToast('本地观看记录已清除')
 }
@@ -701,6 +716,7 @@ function playSource(source: CatalogSource, index: number, preserveDiagnostic = f
   if (!preserveDiagnostic) clearPlaybackDiagnostic()
   updateChannelHealth('checking')
   updateSourceButtons()
+  healthRecordedForLoad = false
   player.load(source, true)
 }
 
@@ -710,17 +726,55 @@ function updateSourceButtons(): void {
   }
 }
 
+function preferredSource(channel: CatalogChannel, excludedSourceIds: ReadonlySet<string> = new Set()) {
+  return rankSources(channel.sources, sourceHealthRecords, excludedSourceIds)[0]
+}
+
+function handlePlaybackMetrics(snapshot: PlaybackMetricsSnapshot): void {
+  if (snapshot.sourceId) elements.video.dataset.playbackMetrics = JSON.stringify(snapshot)
+  else delete elements.video.dataset.playbackMetrics
+  if (healthRecordedForLoad || !snapshot.sourceId || snapshot.startupMs === null || snapshot.mediaAdvancedSeconds < 15) return
+  const channel = getChannel(selectedChannelId)
+  const activeSource = channel?.sources[activeSourceIndex]
+  if (!activeSource || activeSource.id !== snapshot.sourceId || elements.video.paused || elements.video.readyState < 2) return
+
+  const observationMs = snapshot.mediaAdvancedSeconds * 1_000 + snapshot.stallDurationMs
+  const stallRatio = observationMs > 0 ? snapshot.stallDurationMs / observationMs : 0
+  if (stallRatio > 0.05 || (snapshot.droppedFrameRatio ?? 0) > 0.02) return
+  sourceHealthRecords = recordSourceSuccess(sourceHealthRecords, activeSource.id, {
+    startupMs: snapshot.startupMs,
+    stallRatio
+  })
+  healthRecordedForLoad = true
+  persistSourceHealthRecords()
+}
+
+function persistSourceHealthRecords(): void {
+  try {
+    localStorage.setItem(SOURCE_HEALTH_KEY, serializeSourceHealthStore(sourceHealthRecords))
+  } catch {
+    // Local ranking is optional; playback remains usable without storage.
+  }
+}
+
+function clearSourceHealthRecords(): void {
+  sourceHealthRecords = new Map()
+  healthRecordedForLoad = false
+  removeStoredValue(SOURCE_HEALTH_KEY)
+}
+
 function handleFatalSource(diagnostic: PlaybackDiagnostic): void {
   const channel = getChannel(selectedChannelId)
   const current = channel?.sources[activeSourceIndex]
   if (!channel || !current) return
   renderPlaybackDiagnostic(diagnostic)
+  sourceHealthRecords = recordSourceFailure(sourceHealthRecords, current.id)
+  persistSourceHealthRecords()
   failedSources.add(current.id)
-  const nextIndex = channel.sources.findIndex((source) => !failedSources.has(source.id))
-  if (nextIndex >= 0) {
-    showToast(`${diagnostic.title}，正在尝试线路 ${nextIndex + 1}`)
-    const nextSource = channel.sources[nextIndex]
-    if (nextSource) playSource(nextSource, nextIndex, true)
+  const next = preferredSource(channel, failedSources)
+  if (next) {
+    showToast(`${diagnostic.title}，正在尝试线路 ${next.index + 1}`)
+    playSource(next.source, next.index, true)
     return
   }
   updatePlaybackState('error', `${diagnostic.title}：${diagnostic.message}`)
@@ -756,7 +810,8 @@ async function togglePlayback(): Promise<void> {
   }
   if (channel.id !== selectedChannelId) selectChannel(channel.id, false, false)
   if (!player.hasSource) {
-    const source = channel.sources[activeSourceIndex] ?? channel.sources[0]
+    const preferred = preferredSource(channel)
+    const source = channel.sources[activeSourceIndex] ?? preferred?.source
     if (source) playSource(source, channel.sources.indexOf(source))
     return
   }
@@ -1253,6 +1308,14 @@ function readStoredArray(key: string): string[] {
     return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
   } catch {
     return []
+  }
+}
+
+function readStoredSourceHealth() {
+  try {
+    return parseSourceHealthStore(localStorage.getItem(SOURCE_HEALTH_KEY))
+  } catch {
+    return new Map()
   }
 }
 

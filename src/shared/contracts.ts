@@ -179,6 +179,11 @@ export interface RemoteResourceResponse {
   contentType: string
   finalUrl: string
   statusCode: number
+  connectionReused?: boolean
+}
+
+export interface RemoteResourceStreamTicket {
+  streamUrl: string
 }
 
 export interface TvFeedBridge {
@@ -188,6 +193,7 @@ export interface TvFeedBridge {
   onCatalogSyncProgress(listener: (progress: CatalogSyncProgress) => void): () => void
   clearCatalogCache(): Promise<boolean>
   fetchRemoteResource(request: RemoteResourceRequest): Promise<RemoteResourceResponse>
+  prepareRemoteResourceStream(request: RemoteResourceRequest): Promise<RemoteResourceStreamTicket>
   cancelRemoteResource(requestId: string): void
   getAppVersion(): Promise<string>
   setPlayerFullscreen(fullscreen: boolean): Promise<boolean>

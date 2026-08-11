@@ -29,6 +29,7 @@ export interface RawHttpsResponse {
   statusCode: number
   headers: IncomingHttpHeaders
   body: AsyncIterable<Uint8Array>
+  connectionReused?: boolean
   destroy(error?: Error): void
 }
 
@@ -53,9 +54,21 @@ export interface SecureFetchResult {
   contentType: string
   finalUrl: string
   statusCode: number
+  connectionReused: boolean
 }
 
-interface SecureFetchDependencies {
+export interface SecureStreamResult {
+  body: AsyncIterable<Uint8Array>
+  contentType: string
+  contentLength: number | null
+  contentRange: string
+  acceptRanges: string
+  finalUrl: string
+  statusCode: number
+  connectionReused: boolean
+}
+
+export interface SecureFetchDependencies {
   resolve?: AddressResolver
   request?: PinnedRequestExecutor
 }
@@ -98,9 +111,90 @@ let systemProxyResolver: SystemProxyResolver | undefined
 const VERIFIED_HOSTNAME_PROXY_TARGETS = new Set(['iptv-org.github.io'])
 
 const DEFAULT_MAX_REDIRECTS = 5
+const CONNECTION_POOL_MAX_ENTRIES = 64
+const CONNECTION_POOL_IDLE_TTL_MS = 60_000
+const CONNECTION_POOL_MAX_SOCKETS = 6
+const CONNECTION_POOL_MAX_FREE_SOCKETS = 2
+
+interface PooledAgentEntry {
+  agent: HttpsAgent
+  lastUsedAt: number
+}
+
+export class SecureConnectionPool {
+  private readonly entries = new Map<string, PooledAgentEntry>()
+  private readonly maxEntries: number
+  private readonly idleTtlMs: number
+
+  constructor(
+    maxEntries = CONNECTION_POOL_MAX_ENTRIES,
+    idleTtlMs = CONNECTION_POOL_IDLE_TTL_MS
+  ) {
+    if (!Number.isSafeInteger(maxEntries) || maxEntries <= 0) throw new Error('连接池容量无效')
+    if (!Number.isSafeInteger(idleTtlMs) || idleTtlMs <= 0) throw new Error('连接池空闲期限无效')
+    this.maxEntries = maxEntries
+    this.idleTtlMs = idleTtlMs
+  }
+
+  directAgent(target: ResolvedRemoteTarget, now = Date.now()): HttpsAgent {
+    return this.acquire(`direct:${targetKey(target)}`, now, () => new HttpsAgent(agentOptions()))
+  }
+
+  proxyAgent(proxy: URL, target: ResolvedRemoteTarget, now = Date.now()): HttpsAgent {
+    const proxyIdentity = `${proxy.protocol}//${proxy.host}\u0000${proxy.username}\u0000${proxy.password}`
+    return this.acquire(`proxy:${proxyIdentity}:${targetKey(target)}`, now, () => createPooledProxyAgent(proxy, target))
+  }
+
+  get size(): number {
+    return this.entries.size
+  }
+
+  destroy(): void {
+    for (const entry of this.entries.values()) entry.agent.destroy()
+    this.entries.clear()
+  }
+
+  private acquire(key: string, now: number, create: () => HttpsAgent): HttpsAgent {
+    this.prune(now)
+    const current = this.entries.get(key)
+    if (current) {
+      current.lastUsedAt = now
+      this.entries.delete(key)
+      this.entries.set(key, current)
+      return current.agent
+    }
+
+    const entry = { agent: create(), lastUsedAt: now }
+    this.entries.set(key, entry)
+    this.prune(now)
+    return entry.agent
+  }
+
+  private prune(now: number): void {
+    for (const [key, entry] of this.entries) {
+      if (now - entry.lastUsedAt >= this.idleTtlMs) {
+        entry.agent.destroy()
+        this.entries.delete(key)
+      }
+    }
+    while (this.entries.size > this.maxEntries) {
+      const oldestKey = this.entries.keys().next().value as string | undefined
+      if (!oldestKey) break
+      this.entries.get(oldestKey)?.agent.destroy()
+      this.entries.delete(oldestKey)
+    }
+  }
+}
+
+const secureConnectionPool = new SecureConnectionPool()
 
 export function configureSystemProxyResolver(resolver: SystemProxyResolver | undefined): void {
+  if (systemProxyResolver !== resolver) secureConnectionPool.destroy()
   systemProxyResolver = resolver
+}
+
+export function destroySecureConnections(): void {
+  secureConnectionPool.destroy()
 }
 
 export async function fetchBoundedHttps(
@@ -123,7 +217,6 @@ export async function fetchBoundedHttps(
       const headers: Record<string, string> = {
         Accept: options.accept,
         'Accept-Encoding': options.allowCompression === true && options.rangeStart === undefined ? 'gzip' : 'identity',
-        Connection: 'close',
         'User-Agent': 'TV-Feed/0.1'
       }
       if (options.rangeStart !== undefined && options.rangeEnd !== undefined) {
@@ -176,7 +269,8 @@ export async function fetchBoundedHttps(
         body,
         contentType: normalizeContentType(firstHeader(response.headers['content-type']) ?? ''),
         finalUrl: target.url.toString(),
-        statusCode: response.statusCode
+        statusCode: response.statusCode,
+        connectionReused: response.connectionReused === true
       }
     }
 
@@ -192,6 +286,100 @@ export async function fetchBoundedHttps(
     throw toSecureNetworkError(error)
   } finally {
     deadline.dispose()
+  }
+}
+
+export async function streamBoundedHttps(
+  inputUrl: string,
+  options: SecureFetchOptions,
+  dependencies: SecureFetchDependencies = {}
+): Promise<SecureStreamResult> {
+  validateFetchOptions(options)
+  if (options.allowCompression === true) throw new Error('安全流式响应不支持压缩正文')
+  const resolve = dependencies.resolve ?? resolveSystemAddresses
+  const request = dependencies.request ?? openPinnedHttpsRequest
+  const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS
+  const deadline = createDeadline(options.timeoutMs, options.signal)
+  let currentUrl = inputUrl
+  let bodyOwnershipTransferred = false
+
+  try {
+    for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
+      throwIfAborted(deadline.signal)
+      const target = await abortable(resolvePublicTarget(currentUrl, resolve), deadline.signal)
+      throwIfAborted(deadline.signal)
+      const headers: Record<string, string> = {
+        Accept: options.accept,
+        'Accept-Encoding': 'identity',
+        'User-Agent': 'TV-Feed/0.1'
+      }
+      if (options.rangeStart !== undefined && options.rangeEnd !== undefined) {
+        headers.Range = `bytes=${options.rangeStart}-${options.rangeEnd - 1}`
+      }
+
+      const response = await request(target, {
+        headers,
+        timeoutMs: options.timeoutMs,
+        signal: deadline.signal
+      })
+      const location = firstHeader(response.headers.location)
+      if (isRedirect(response.statusCode)) {
+        response.destroy()
+        if (!location) throw new Error(`远程服务器返回 HTTP ${response.statusCode}，但没有安全的重定向地址`)
+        if (redirectCount >= maxRedirects) throw new Error(`远程请求重定向超过 ${maxRedirects} 次`)
+        try {
+          currentUrl = new URL(location, target.url).toString()
+        } catch {
+          throw new Error('远程服务器返回了无效的重定向地址')
+        }
+        continue
+      }
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        response.destroy()
+        throw new SecureNetworkError(
+          'http',
+          `远程服务器返回 HTTP ${response.statusCode}`,
+          response.statusCode === 429 || response.statusCode >= 500,
+          { statusCode: response.statusCode }
+        )
+      }
+      const contentEncoding = firstHeader(response.headers['content-encoding'])?.trim().toLocaleLowerCase()
+      if (contentEncoding && contentEncoding !== 'identity') {
+        response.destroy()
+        throw new Error(`安全流式响应不接受内容编码 ${contentEncoding}`)
+      }
+      const contentLength = parseContentLength(firstHeader(response.headers['content-length']))
+      if (contentLength !== undefined && contentLength > options.maxBytes) {
+        response.destroy()
+        throw new Error(`远程响应声明的大小 ${contentLength} 超过 ${options.maxBytes} 字节安全上限`)
+      }
+
+      bodyOwnershipTransferred = true
+      return {
+        body: boundedStreamingBody(response, options.maxBytes, deadline),
+        contentType: normalizeContentType(firstHeader(response.headers['content-type']) ?? ''),
+        contentLength: contentLength ?? null,
+        contentRange: safeContentRange(firstHeader(response.headers['content-range'])),
+        acceptRanges: firstHeader(response.headers['accept-ranges'])?.trim().toLocaleLowerCase() === 'bytes' ? 'bytes' : '',
+        finalUrl: target.url.toString(),
+        statusCode: response.statusCode,
+        connectionReused: response.connectionReused === true
+      }
+    }
+
+    throw new Error('远程请求重定向处理失败')
+  } catch (error) {
+    if (deadline.signal.aborted) {
+      const reason = deadline.signal.reason instanceof Error ? deadline.signal.reason : new Error('远程请求已取消')
+      if (reason.message.includes('总时间上限')) {
+        throw new SecureNetworkError('timeout', reason.message, true, { cause: reason })
+      }
+      throw toSecureNetworkError(reason)
+    }
+    throw toSecureNetworkError(error)
+  } finally {
+    if (!bodyOwnershipTransferred) deadline.dispose()
   }
 }
 
@@ -288,6 +476,40 @@ export async function readBoundedBody(response: RawHttpsResponse, maxBytes: numb
   return body
 }
 
+async function* boundedStreamingBody(
+  response: RawHttpsResponse,
+  maxBytes: number,
+  deadline: ReturnType<typeof createDeadline>
+): AsyncGenerator<Uint8Array> {
+  let totalBytes = 0
+  let completed = false
+  try {
+    for await (const chunk of response.body) {
+      throwIfAborted(deadline.signal)
+      totalBytes += chunk.byteLength
+      if (totalBytes > maxBytes) {
+        throw new Error(`远程响应超过 ${maxBytes} 字节安全上限`)
+      }
+      yield chunk
+    }
+    throwIfAborted(deadline.signal)
+    completed = true
+  } catch (error) {
+    response.destroy(error instanceof Error ? error : undefined)
+    if (deadline.signal.aborted) {
+      const reason = deadline.signal.reason instanceof Error ? deadline.signal.reason : new Error('远程请求已取消')
+      if (reason.message.includes('总时间上限')) {
+        throw new SecureNetworkError('timeout', reason.message, true, { cause: reason })
+      }
+      throw toSecureNetworkError(reason)
+    }
+    throw toSecureNetworkError(error)
+  } finally {
+    if (!completed) response.destroy(new Error('安全流式响应未完整消费'))
+    deadline.dispose()
+  }
+}
+
 export function gunzipBounded(body: Uint8Array, maxBytes: number): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     gunzip(body, { maxOutputLength: maxBytes }, (error, result) => {
@@ -318,11 +540,17 @@ async function openPinnedHttpsRequest(
   const routes = await resolveProxyRoutes(target.url, options.signal)
   let lastProxyError: unknown
   for (const route of routes) {
-    if (route.kind === 'direct') return issueHttpsRequest(target, options)
+    if (route.kind === 'direct') {
+      return issueHttpsRequest(
+        target,
+        options,
+        secureConnectionPool.directAgent(target),
+        createPinnedLookup(target.hostname, target.addresses)
+      )
+    }
     if (!route.proxy) continue
     try {
-      const socket = await createProxyTlsTunnel(route.proxy, target, options)
-      return issueHttpsRequest(target, options, socket)
+      return await issueHttpsRequest(target, options, secureConnectionPool.proxyAgent(route.proxy, target))
     } catch (error) {
       lastProxyError = error
     }
@@ -334,24 +562,15 @@ async function openPinnedHttpsRequest(
 function issueHttpsRequest(
   target: ResolvedRemoteTarget,
   options: PinnedRequestOptions,
-  socket?: TLSSocket
+  agent: HttpsAgent,
+  lookup?: LookupFunction
 ): Promise<RawHttpsResponse> {
   return new Promise((resolve, reject) => {
-    const tunnelAgent = socket ? new HttpsAgent({ keepAlive: false }) : undefined
-    if (tunnelAgent && socket) {
-      tunnelAgent.createConnection = ((
-        _options: unknown,
-        callback?: (error: Error | null, connectedSocket: TLSSocket) => void
-      ): TLSSocket => {
-        callback?.(null, socket)
-        return socket
-      }) as typeof tunnelAgent.createConnection
-    }
     const request = httpsRequest(target.url, {
       method: 'GET',
       headers: options.headers,
-      agent: tunnelAgent ?? false,
-      ...(socket ? {} : { lookup: createPinnedLookup(target.hostname, target.addresses) }),
+      agent,
+      ...(lookup ? { lookup } : {}),
       ...(options.signal ? { signal: options.signal } : {})
     }, onResponse)
 
@@ -360,16 +579,55 @@ function issueHttpsRequest(
         statusCode: response.statusCode ?? 0,
         headers: response.headers,
         body: response,
+        connectionReused: request.reusedSocket,
         destroy: (error?: Error) => response.destroy(error)
       })
     }
     request.setTimeout(options.timeoutMs, () => request.destroy(new Error('远程请求超时')))
-    request.once('error', (error) => {
-      tunnelAgent?.destroy()
-      reject(error)
-    })
+    request.once('error', reject)
     request.end()
   })
+}
+
+function agentOptions(): ConstructorParameters<typeof HttpsAgent>[0] {
+  return {
+    keepAlive: true,
+    keepAliveMsecs: 10_000,
+    maxSockets: CONNECTION_POOL_MAX_SOCKETS,
+    maxFreeSockets: CONNECTION_POOL_MAX_FREE_SOCKETS,
+    timeout: CONNECTION_POOL_IDLE_TTL_MS
+  }
+}
+
+function targetKey(target: ResolvedRemoteTarget): string {
+  const port = target.url.port || '443'
+  const addresses = [...target.addresses]
+    .sort((left, right) => left.family - right.family || left.address.localeCompare(right.address))
+    .map((entry) => `${entry.family}:${entry.address}`)
+    .join(',')
+  return `${canonicalHostname(target.hostname)}:${port}:${addresses}`
+}
+
+function createPooledProxyAgent(proxy: URL, target: ResolvedRemoteTarget): HttpsAgent {
+  const agent = new HttpsAgent(agentOptions())
+  agent.createConnection = ((
+    connectionOptions: { signal?: AbortSignal; timeout?: number },
+    callback?: (error: Error | null, connectedSocket?: TLSSocket) => void
+  ): undefined => {
+    const timeoutMs = Number.isSafeInteger(connectionOptions.timeout) && Number(connectionOptions.timeout) > 0
+      ? Math.min(Number(connectionOptions.timeout), 120_000)
+      : 30_000
+    void createProxyTlsTunnel(proxy, target, {
+      headers: {},
+      timeoutMs,
+      ...(connectionOptions.signal ? { signal: connectionOptions.signal } : {})
+    }).then(
+      (socket) => callback?.(null, socket),
+      (error: unknown) => callback?.(error instanceof Error ? error : new Error(String(error)))
+    )
+    return undefined
+  }) as typeof agent.createConnection
+  return agent
 }
 
 function createProxyTlsTunnel(
@@ -549,6 +807,11 @@ function parseContentLength(value: string | undefined): number | undefined {
   if (!value || !/^\d+$/.test(value)) return undefined
   const parsed = Number(value)
   return Number.isSafeInteger(parsed) ? parsed : undefined
+}
+
+function safeContentRange(value: string | undefined): string {
+  const normalized = value?.trim() ?? ''
+  return /^bytes \d+-\d+\/(?:\d+|\*)$/i.test(normalized) ? normalized : ''
 }
 
 function normalizeContentType(value: string): string {

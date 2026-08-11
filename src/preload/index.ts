@@ -19,6 +19,7 @@ const bridge: TvFeedBridge = Object.freeze({
   },
   clearCatalogCache: () => ipcRenderer.invoke('catalog:clear-cache'),
   fetchRemoteResource: (request: RemoteResourceRequest) => ipcRenderer.invoke('remote-resource:fetch', request),
+  prepareRemoteResourceStream: (request: RemoteResourceRequest) => ipcRenderer.invoke('remote-resource:prepare-stream', request),
   cancelRemoteResource: (requestId: string) => ipcRenderer.send('remote-resource:cancel', requestId),
   getAppVersion: () => ipcRenderer.invoke('app:version'),
   setPlayerFullscreen: (fullscreen: boolean) => ipcRenderer.invoke('player-fullscreen:set', fullscreen),

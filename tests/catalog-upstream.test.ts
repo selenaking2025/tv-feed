@@ -66,6 +66,7 @@ function jsonResponse(value: unknown): SecureFetchResult {
     body: new TextEncoder().encode(JSON.stringify(value)),
     contentType: 'application/json',
     finalUrl: 'https://iptv-org.github.io/api/test.json',
-    statusCode: 200
+    statusCode: 200,
+    connectionReused: false
   }
 }
