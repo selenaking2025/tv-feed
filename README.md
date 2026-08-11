@@ -42,6 +42,8 @@ npm run build
 npm run smoke
 ```
 
+私有仓库的 GitHub Actions 会在每次推送到 `main` 和每个 Pull Request 上使用官方 npm registry 执行全新 `npm ci`、仓库边界检查、类型检查、单元测试和生产构建。仓库边界检查会拒绝频道缓存、M3U、安装包、未批准图片、常见凭据、非官方依赖下载地址，以及渲染进程直接联网等回归。
+
 `npm run smoke` 会使用内置虚构样例目录真实启动 Electron、检查主要界面状态，并将截图写入系统临时目录。样例线路使用保留的 `.invalid` 域名，不代表任何真实频道或直播源。
 
 公开 README 截图必须通过离线样例模式生成，不要使用 `TVFEED_SMOKE_LIVE=1` 或 `TVFEED_SMOKE_PLAY=1`：
