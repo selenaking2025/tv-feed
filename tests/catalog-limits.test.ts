@@ -9,7 +9,7 @@ import {
   parseCatalogCache,
   serializeCatalogForCache
 } from '../src/shared/catalog-limits.ts'
-import type { Catalog, UpstreamBundle } from '../src/shared/contracts.ts'
+import type { Catalog, UpstreamBundle } from '../src/shared/catalog-contracts.ts'
 
 test('JSON 数组在解析后立即执行记录数硬上限', () => {
   const body = new TextEncoder().encode('[{"id":1},{"id":2},{"id":3}]')

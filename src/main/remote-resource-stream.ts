@@ -1,4 +1,4 @@
-import type { RemoteResourceRequest } from '../shared/contracts.ts'
+import type { RemoteResourceRequest } from '../shared/remote-resource-contracts.ts'
 import {
   streamBoundedHttps,
   type SecureFetchOptions,

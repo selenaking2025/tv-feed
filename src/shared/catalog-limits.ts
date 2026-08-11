@@ -7,7 +7,7 @@ import type {
   UpstreamCountry,
   UpstreamLogo,
   UpstreamStream
-} from './contracts.ts'
+} from './catalog-contracts.ts'
 import { normalizeRemoteHlsUrl, normalizeRemoteHttpsUrl } from './remote-url-policy.ts'
 
 const KIB = 1_024

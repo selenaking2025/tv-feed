@@ -55,7 +55,7 @@ export function findForbiddenPathViolations(files) {
     const basename = segments.at(-1)?.toLocaleLowerCase() ?? ''
     const extension = extname(basename)
 
-    if (basename === 'catalog-v1.json') violations.push(`${file}: 不得提交频道目录缓存`)
+    if (basename === 'catalog-v1.json' || basename === 'catalog-v2.json') violations.push(`${file}: 不得提交频道目录缓存`)
     if (segments.includes('out') || segments.includes('release') || segments.some((segment) => segment.endsWith('.app'))) {
       violations.push(`${file}: 不得提交构建或安装产物`)
     }
@@ -109,7 +109,7 @@ export function findRendererBoundaryViolations(entries) {
     }
   }
 
-  for (const requiredFile of ['src/main/index.ts', 'src/renderer/index.html']) {
+  for (const requiredFile of ['src/main/app-protocol.ts', 'src/renderer/index.html']) {
     const source = entries.get(requiredFile)
     if (source === undefined) {
       violations.push(`${requiredFile}: 缺少 CSP 校验目标`)
@@ -136,12 +136,80 @@ export function findRendererBoundaryViolations(entries) {
   if (/import\s+['"]\.\/(?:phosphor-icons|styles)\.css['"]/.test(rendererMain)) {
     violations.push('src/renderer/src/main.ts: 严格 CSP 的开发模式不得通过 TypeScript 注入界面样式')
   }
-  if (!/let\s+remoteLogosEnabled\s*=\s*(?:!familySafetyEnabled\s*&&\s*)?readStoredBoolean\(REMOTE_LOGOS_KEY\)/.test(rendererMain)) {
-    violations.push('src/renderer/src/main.ts: 远程台标必须从默认关闭的本地布尔偏好读取')
+  if (!/new\s+SafetyClient\(window\.tvFeed\)/.test(rendererMain)) {
+    violations.push('src/renderer/src/main.ts: 家庭安全必须通过 SafetyClient 初始化主进程权威状态')
   }
-  if (!/localStorage\.getItem\(key\)\s*===\s*['"]true['"]/.test(rendererMain)) {
-    violations.push('src/renderer/src/main.ts: 远程台标偏好在缺失时必须返回 false')
+  if (/tvfeed:(?:family-safety|remote-logos):v1/.test(rendererMain) || /readStoredBoolean\s*\(/.test(rendererMain)) {
+    violations.push('src/renderer/src/main.ts: 不得把旧本地安全偏好重新作为渲染入口权威')
   }
+  const safetyClient = entries.get('src/renderer/src/safety-client.ts') ?? ''
+  if (!/initializeSafetyState\s*\(/.test(safetyClient) || !/state\.familySafety/.test(safetyClient) || !/state\.remoteLogos/.test(safetyClient)) {
+    violations.push('src/renderer/src/safety-client.ts: 缺少主进程安全初始化或兼容投影')
+  }
+  return violations
+}
+
+export function findArchitectureBoundaryViolations(entries) {
+  const violations = []
+  const architecture = entries.get('docs/ARCHITECTURE.md') ?? ''
+  for (const marker of [
+    '<!-- architecture-record:v1 -->',
+    '## 权威与投影',
+    '## 阶段一：目录协调器',
+    '## 阶段二：主进程家庭安全权威',
+    '## 阶段三：目录缓存 V2',
+    '## 阶段四：入口与边界拆分',
+    '## 阶段五：架构守卫与政策生命周期',
+    '## 验证契约'
+  ]) {
+    if (!architecture.includes(marker)) violations.push(`docs/ARCHITECTURE.md: 缺少架构记录标记 ${marker}`)
+  }
+
+  if (entries.has('src/shared/contracts.ts')) {
+    violations.push('src/shared/contracts.ts: 已拆分的单体共享契约不得恢复')
+  }
+  if (entries.has('src/main/smoke-driver.ts')) {
+    violations.push('src/main/smoke-driver.ts: 完整冒烟驱动不得进入生产源码')
+  }
+
+  const ipcLiteral = /['"](?:catalog|safety|remote-resource|app|player-fullscreen|renderer):[A-Za-z0-9:-]+['"]/g
+  for (const [rawFile, text] of entries) {
+    const file = normalizePath(rawFile)
+    if (!file.startsWith('src/')) continue
+
+    if (file !== 'src/main/runtime-config.ts' &&
+      /(?:process\.env|environment)(?:\.TVFEED_SMOKE_[A-Z0-9_]+|\[['"]TVFEED_SMOKE_[A-Z0-9_]+['"]\])/.test(text)) {
+      violations.push(`${file}: 冒烟环境变量只能由 runtime-config.ts 读取`)
+    }
+    if (file !== 'src/shared/ipc-contract.ts') {
+      ipcLiteral.lastIndex = 0
+      if (ipcLiteral.test(text)) violations.push(`${file}: IPC 通道字面量只能在 ipc-contract.ts 声明`)
+    }
+    if (file.startsWith('src/shared/') && /from\s+['"](?:node:|electron|\.\.\/main\/)/.test(text)) {
+      violations.push(`${file}: shared 层不得依赖 Electron、Node 或 main 层`)
+    }
+    if (file.startsWith('src/renderer/') && /from\s+['"](?:node:|electron|\.\.\/\.\.\/main\/)/.test(text)) {
+      violations.push(`${file}: renderer 层不得依赖 Electron、Node 或 main 层`)
+    }
+    if (file.startsWith('src/renderer/') && /from\s+['"][^'"]*catalog\.ts['"]/.test(text)) {
+      violations.push(`${file}: renderer 不得直接执行目录安全投影`)
+    }
+    if (file !== 'src/main/catalog-service.ts' && /new\s+CatalogCacheRepository\s*\(/.test(text)) {
+      violations.push(`${file}: 目录缓存仓库只能由 catalog-service.ts 组装`)
+    }
+  }
+
+  const mainIndex = entries.get('src/main/index.ts') ?? ''
+  if (mainIndex.split(/\r?\n/).length > 220) violations.push('src/main/index.ts: 主入口超过 220 行职责预算')
+  for (const forbidden of [
+    { label: 'IPC 注册', pattern: /\bipcMain\.(?:handle|on)\s*\(/ },
+    { label: '协议处理', pattern: /\bprotocol\.handle\s*\(/ },
+    { label: '远程请求表', pattern: /new\s+Map<[^>]*ActiveRemoteFetch/ },
+    { label: '静态冒烟驱动', pattern: /(?:from\s+)?['"][^'"]*smoke-driver/ }
+  ]) {
+    if (forbidden.pattern.test(mainIndex)) violations.push(`src/main/index.ts: 不得重新承担 ${forbidden.label}职责`)
+  }
+
   return violations
 }
 
@@ -190,6 +258,7 @@ export function verifyRepositorySnapshot({ files, entries }) {
   const violations = [
     ...findForbiddenPathViolations(files),
     ...findRendererBoundaryViolations(entries),
+    ...findArchitectureBoundaryViolations(entries),
     ...findSecretViolations(entries)
   ]
   const lockfile = entries.get('package-lock.json')
@@ -208,7 +277,13 @@ export function readTrackedSnapshot(root) {
   const files = output.toString('utf8').split('\0').filter(Boolean).map(normalizePath)
   const entries = new Map()
   for (const file of files) {
-    const body = readFileSync(resolve(root, file))
+    let body
+    try {
+      body = readFileSync(resolve(root, file))
+    } catch (error) {
+      if (error && typeof error === 'object' && error.code === 'ENOENT') continue
+      throw error
+    }
     if (!looksBinary(body)) entries.set(file, body.toString('utf8'))
   }
   return { files, entries }
@@ -234,7 +309,7 @@ function runCli() {
     process.exitCode = 1
     return
   }
-  process.stdout.write('仓库边界验证通过：依赖来源、内容文件、远程网络边界、CI 固定版本和基本密钥扫描均符合要求。\n')
+  process.stdout.write('仓库边界验证通过：架构权威、依赖方向、IPC、运行配置、远程网络、内容文件、CI 固定版本和基本密钥扫描均符合要求。\n')
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runCli()

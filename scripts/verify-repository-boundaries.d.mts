@@ -8,6 +8,7 @@ export interface RepositorySnapshot {
 export function findForbiddenPathViolations(files: readonly string[]): string[]
 export function findLockfileRegistryViolations(lockfileText: string): string[]
 export function findRendererBoundaryViolations(entries: RepositoryEntries): string[]
+export function findArchitectureBoundaryViolations(entries: RepositoryEntries): string[]
 export function findSecretViolations(entries: RepositoryEntries): string[]
 export function findWorkflowViolations(workflowText: string): string[]
 export function verifyRepositorySnapshot(snapshot: RepositorySnapshot): string[]

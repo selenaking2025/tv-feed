@@ -7,7 +7,7 @@ import type {
   UpstreamChannel,
   UpstreamLogo,
   UpstreamStream
-} from './contracts.ts'
+} from './catalog-contracts.ts'
 import { CATALOG_LIMITS, sanitizeUpstreamBundle } from './catalog-limits.ts'
 import { FAMILY_APPROVED_CHANNEL_IDS } from './family-safety.ts'
 import { PROJECT_DENIED_CHANNEL_IDS } from './project-denylist.ts'

@@ -7,7 +7,7 @@ import type {
   LoaderResponse
 } from 'hls.js'
 import { resourceKind, resourceRange, SecureHlsLoader } from '../src/renderer/src/secure-hls-loader.ts'
-import type { RemoteResourceRequest, RemoteResourceResponse } from '../src/shared/contracts.ts'
+import type { RemoteResourceRequest, RemoteResourceResponse } from '../src/shared/remote-resource-contracts.ts'
 
 const LOADER_CONFIGURATION: LoaderConfiguration = {
   loadPolicy: {

@@ -2,7 +2,7 @@ import type {
   RemoteResourceKind,
   RemoteResourceRequest,
   RemoteResourceResponse
-} from '../shared/contracts.ts'
+} from '../shared/remote-resource-contracts.ts'
 import { MAX_REMOTE_URL_LENGTH } from '../shared/remote-url-policy.ts'
 import { fetchBoundedHttps, type SecureFetchOptions, type SecureFetchResult } from './secure-network.ts'
 

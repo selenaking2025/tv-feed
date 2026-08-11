@@ -5,7 +5,7 @@ import {
 } from '../shared/catalog-limits.ts'
 import type {
   CatalogFailureCode,
-  CatalogSyncProgress,
+  CatalogSyncProgressUpdate,
   UpstreamBlocklistEntry,
   UpstreamBundle,
   UpstreamCategory,
@@ -13,7 +13,7 @@ import type {
   UpstreamCountry,
   UpstreamLogo,
   UpstreamStream
-} from '../shared/contracts.ts'
+} from '../shared/catalog-contracts.ts'
 import {
   fetchBoundedHttps,
   SecureNetworkError,
@@ -37,7 +37,7 @@ export const IPTV_ORG_ENDPOINTS = Object.freeze({
 })
 
 type SecureFetcher = (url: string, options: SecureFetchOptions) => Promise<SecureFetchResult>
-type ProgressReporter = (progress: CatalogSyncProgress) => void
+type ProgressReporter = (progress: CatalogSyncProgressUpdate) => void
 
 export interface IptvOrgFetchDependencies {
   fetcher?: SecureFetcher

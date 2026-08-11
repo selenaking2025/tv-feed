@@ -5,7 +5,7 @@ import { displayCountryName, getCountrySearchAliases, sortCountriesForDisplay } 
 import { FAMILY_APPROVED_CHANNELS, FAMILY_APPROVED_CHANNEL_IDS, familyApprovalHasIndependentOfficialReview } from '../src/shared/family-safety.ts'
 import { createHlsAcceptanceCatalog, createOfflineSampleCatalog } from '../src/shared/sample-catalog.ts'
 import { CATALOG_LIMITS } from '../src/shared/catalog-limits.ts'
-import type { UpstreamBundle, UpstreamChannel } from '../src/shared/contracts.ts'
+import type { UpstreamBundle, UpstreamChannel } from '../src/shared/catalog-contracts.ts'
 
 function channel(id: string, overrides: Partial<UpstreamChannel> = {}): UpstreamChannel {
   return {

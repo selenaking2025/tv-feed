@@ -1,4 +1,3 @@
-import { applyFamilySafetyAllowlist } from '../../shared/catalog.ts'
 import {
   appendChannelNumberDigit,
   CHANNEL_NUMBER_COMMIT_DELAY_MS,
@@ -13,11 +12,12 @@ import type {
   CatalogLoadResult,
   CatalogSource,
   CatalogSyncProgress
-} from '../../shared/contracts.ts'
+} from '../../shared/catalog-contracts.ts'
 import { displayCountryName, getCountrySearchAliases, sortCountriesForDisplay } from '../../shared/countries.ts'
 import { hasVerifiedOfficialSource, isVerifiedOfficialSource } from '../../shared/official-sources.ts'
 import type { PlaybackDiagnostic } from '../../shared/playback-diagnostics.ts'
 import type { PlaybackMetricsSnapshot } from '../../shared/playback-metrics.ts'
+import type { SafetyStateSnapshot } from '../../shared/safety-contracts.ts'
 import {
   parseSourceHealthStore,
   rankSources,
@@ -26,6 +26,15 @@ import {
   serializeSourceHealthStore
 } from '../../shared/source-health.ts'
 import { StreamPlayer, type PlaybackState } from './player.ts'
+import {
+  readStoredArray,
+  readStoredString,
+  removeStoredValue,
+  writeStoredArray,
+  writeStoredString
+} from './local-state.ts'
+import { RemoteLogoController } from './remote-logo-controller.ts'
+import { SafetyClient } from './safety-client.ts'
 
 type ViewMode = 'all' | 'chinese' | 'favorites' | 'recent'
 
@@ -34,12 +43,8 @@ const OVERSCAN = 7
 const FAVORITES_KEY = 'tvfeed:favorites:v1'
 const RECENTS_KEY = 'tvfeed:recents:v1'
 const LAST_CHANNEL_KEY = 'tvfeed:last-channel:v1'
-const REMOTE_LOGOS_KEY = 'tvfeed:remote-logos:v1'
-const FAMILY_SAFETY_KEY = 'tvfeed:family-safety:v1'
 const SOURCE_HEALTH_KEY = 'tvfeed:source-health:v1'
 const CHINESE_REGIONS = new Set(['CN', 'HK', 'TW', 'MO'])
-const MAX_CONCURRENT_LOGO_REQUESTS = 4
-const MAX_PENDING_LOGO_REQUESTS = 64
 const compactSidebarQuery = window.matchMedia('(max-width: 1040px)')
 
 const elements = {
@@ -115,18 +120,15 @@ let failedSources = new Set<string>()
 let healthRecordedForLoad = false
 let refreshInProgress = false
 let catalogSyncActive = false
-let familySafetyEnabled = readStoredBoolean(FAMILY_SAFETY_KEY)
-let remoteLogosEnabled = !familySafetyEnabled && readStoredBoolean(REMOTE_LOGOS_KEY)
+let familySafetyEnabled = false
+let remoteLogosEnabled = false
 let currentCacheStatus: CacheStatus = 'offline-sample'
-let logoRequestSequence = 0
-let activeLogoRequests = 0
 let channelNumberBuffer = ''
 let channelNumberTimer: number | undefined
 let announcementTimer: number | undefined
 let fullscreenTransitionInProgress = false
-const logoQueue: Array<() => Promise<void>> = []
-const activeLogoRequestIds = new Set<string>()
-const activeLogoObjectUrls = new Set<string>()
+const safetyClient = new SafetyClient(window.tvFeed)
+const remoteLogoController = new RemoteLogoController(window.tvFeed)
 
 const player = new StreamPlayer(elements.video, {
   onState: updatePlaybackState,
@@ -140,14 +142,23 @@ void initialize()
 async function initialize(): Promise<void> {
   catalogSyncActive = true
   try {
-    if (familySafetyEnabled) enforceFamilyLocalState()
-    const response = await window.tvFeed.loadCatalog(false, familySafetyEnabled)
+    let safety = await safetyClient.initialize()
+    applySafetyState(safety)
+    if (safety.pendingViewingDataClear) {
+      enforceFamilyLocalState()
+      safety = await safetyClient.acknowledgeCleanup(safety.transitionId)
+      applySafetyState(safety)
+    } else if (familySafetyEnabled) {
+      enforceFamilyLocalState()
+    }
+    const response = await window.tvFeed.loadCatalog({ intent: 'startup' })
     if (response.ok) applyCatalog(response.result)
     else showCatalogFailure(response.failure)
   } catch (error) {
     showCatalogFailure(unexpectedCatalogFailure(error))
   } finally {
     catalogSyncActive = false
+    syncSafetyControls()
     elements.loadingList.hidden = true
     elements.app.dataset.appReady = 'true'
     window.tvFeed.signalRendererReady()
@@ -187,7 +198,7 @@ function bindEvents(): void {
   elements.catalogInfo.addEventListener('click', () => elements.infoDialog.showModal())
   elements.dialogClose.addEventListener('click', () => elements.infoDialog.close())
   elements.familySafetyToggle.addEventListener('change', () => void updateFamilySafetyPreference())
-  elements.remoteLogoToggle.addEventListener('change', updateRemoteLogoPreference)
+  elements.remoteLogoToggle.addEventListener('change', () => void updateRemoteLogoPreference())
   elements.clearCatalogCache.addEventListener('click', () => void clearCatalogCacheFromSettings())
   elements.clearViewingData.addEventListener('click', clearViewingDataFromSettings)
   elements.infoDialog.addEventListener('click', (event) => {
@@ -239,7 +250,7 @@ async function refreshCatalog(): Promise<void> {
   syncSafetyControls()
   beginCatalogSync('正在从 iptv-org 更新…')
   try {
-    const response = await window.tvFeed.loadCatalog(true, familySafetyEnabled)
+    const response = await window.tvFeed.loadCatalog({ intent: 'refresh' })
     if (response.ok) {
       applyCatalog(response.result)
       showToast(response.result.cacheStatus === 'network' ? '频道目录已更新' : '已重新载入频道目录')
@@ -467,7 +478,7 @@ function createLogo(channel: CatalogChannel, className: string): HTMLElement {
   fallback.className = 'logo-fallback'
   fallback.textContent = channel.flag || initials(channel.name)
   wrapper.append(fallback)
-  if (remoteLogosEnabled && channel.logoUrl) {
+  if (remoteLogoController.enabled && channel.logoUrl) {
     const image = document.createElement('img')
     image.dataset.remoteLogo = 'true'
     image.alt = ''
@@ -475,62 +486,14 @@ function createLogo(channel: CatalogChannel, className: string): HTMLElement {
     image.referrerPolicy = 'no-referrer'
     image.hidden = true
     wrapper.append(image)
-    enqueueLogoLoad(wrapper, image, channel.logoUrl)
+    remoteLogoController.attach(wrapper, image, channel.logoUrl)
   }
   return wrapper
 }
 
-function enqueueLogoLoad(wrapper: HTMLElement, image: HTMLImageElement, url: string): void {
-  if (logoQueue.length >= MAX_PENDING_LOGO_REQUESTS) {
-    image.remove()
-    return
-  }
-  logoQueue.push(async () => {
-    if (!remoteLogosEnabled || !wrapper.isConnected) return
-    const requestId = `logo-${Date.now().toString(36)}-${(logoRequestSequence += 1).toString(36)}`
-    activeLogoRequestIds.add(requestId)
-    try {
-      const response = await window.tvFeed.fetchRemoteResource({ requestId, url, kind: 'logo' })
-      if (!remoteLogosEnabled || !wrapper.isConnected) return
-      const objectUrl = URL.createObjectURL(new Blob([Uint8Array.from(response.body).buffer], { type: response.contentType }))
-      activeLogoObjectUrls.add(objectUrl)
-      const releaseObjectUrl = (): void => {
-        if (!activeLogoObjectUrls.delete(objectUrl)) return
-        URL.revokeObjectURL(objectUrl)
-      }
-      image.addEventListener('load', () => {
-        image.hidden = false
-        releaseObjectUrl()
-      }, { once: true })
-      image.addEventListener('error', () => {
-        releaseObjectUrl()
-        image.remove()
-      }, { once: true })
-      image.src = objectUrl
-    } catch {
-      image.remove()
-    } finally {
-      activeLogoRequestIds.delete(requestId)
-    }
-  })
-  pumpLogoQueue()
-}
-
-function pumpLogoQueue(): void {
-  while (activeLogoRequests < MAX_CONCURRENT_LOGO_REQUESTS) {
-    const task = logoQueue.shift()
-    if (!task) return
-    activeLogoRequests += 1
-    void task().finally(() => {
-      activeLogoRequests -= 1
-      pumpLogoQueue()
-    })
-  }
-}
-
 function syncSafetyControls(): void {
   elements.familySafetyToggle.checked = familySafetyEnabled
-  elements.familySafetyToggle.disabled = refreshInProgress
+  elements.familySafetyToggle.disabled = refreshInProgress || catalogSyncActive
   elements.remoteLogoToggle.checked = remoteLogosEnabled
   elements.remoteLogoToggle.disabled = familySafetyEnabled
   elements.remoteLogoHelp.textContent = familySafetyEnabled
@@ -540,19 +503,20 @@ function syncSafetyControls(): void {
   elements.app.dataset.familySafety = String(familySafetyEnabled)
 }
 
+function applySafetyState(state: SafetyStateSnapshot): void {
+  familySafetyEnabled = state.familySafety
+  remoteLogosEnabled = state.remoteLogos
+  remoteLogoController.setEnabled(remoteLogosEnabled)
+  syncSafetyControls()
+}
+
 function clearRemoteLogoResources(): void {
-  logoQueue.length = 0
-  for (const requestId of activeLogoRequestIds) window.tvFeed.cancelRemoteResource(requestId)
-  activeLogoRequestIds.clear()
-  for (const objectUrl of activeLogoObjectUrls) URL.revokeObjectURL(objectUrl)
-  activeLogoObjectUrls.clear()
-  document.querySelectorAll<HTMLImageElement>('img[data-remote-logo="true"]').forEach((image) => image.remove())
+  remoteLogoController.clear()
 }
 
 function disableRemoteLogos(): void {
   remoteLogosEnabled = false
-  writeStoredBoolean(REMOTE_LOGOS_KEY, false)
-  clearRemoteLogoResources()
+  remoteLogoController.setEnabled(false)
   syncSafetyControls()
 }
 
@@ -575,46 +539,34 @@ async function updateFamilySafetyPreference(): Promise<void> {
 
   const requested = elements.familySafetyToggle.checked
   if (requested === familySafetyEnabled) return
-  familySafetyEnabled = requested
-  writeStoredBoolean(FAMILY_SAFETY_KEY, familySafetyEnabled)
   refreshInProgress = true
   elements.refreshCatalog.disabled = true
   syncSafetyControls()
 
-  let cacheWarning = ''
-  if (familySafetyEnabled) {
-    enforceFamilyLocalState()
-    if (catalog) {
-      applyCatalog({
-        catalog: applyFamilySafetyAllowlist(catalog),
-        cacheStatus: currentCacheStatus,
-        warning: ''
-      })
-    }
-    try {
-      await window.tvFeed.clearCatalogCache()
-    } catch (error) {
-      cacheWarning = `旧目录缓存未能清除：${errorMessage(error)}`
-    }
-  }
-
-  elements.catalogState.textContent = familySafetyEnabled ? '正在加载家庭安全目录…' : '正在恢复完整目录…'
   try {
-    const response = await window.tvFeed.loadCatalog(familySafetyEnabled, familySafetyEnabled)
+    const transition = await safetyClient.setFamilySafety(requested)
+    applySafetyState(transition.state)
+    if (transition.state.pendingViewingDataClear) {
+      enforceFamilyLocalState()
+      applySafetyState(await safetyClient.acknowledgeCleanup(transition.state.transitionId))
+    }
+    elements.catalogState.textContent = familySafetyEnabled ? '正在加载家庭安全目录…' : '正在恢复完整目录…'
+    const response = await window.tvFeed.loadCatalog({ intent: 'refresh' })
     if (response.ok) {
       applyCatalog(response.result)
       const message = familySafetyEnabled
-        ? `家庭安全模式已开启；仅显示本地允许列表。${cacheWarning}`
+        ? `家庭安全模式已开启；仅显示本地允许列表。${transition.warning}`
         : '家庭安全模式已关闭；已恢复保守过滤后的目录。'
       setPrivacyStatus(message)
       showToast(familySafetyEnabled ? '家庭安全模式已开启' : '家庭安全模式已关闭')
     } else {
       showCatalogFailure(response.failure)
-      setPrivacyStatus(`${response.failure.title}。${cacheWarning}`)
+      setPrivacyStatus(`${response.failure.title}。${transition.warning}`)
     }
   } catch (error) {
+    elements.familySafetyToggle.checked = familySafetyEnabled
     const message = `切换家庭安全模式后目录加载失败：${errorMessage(error)}`
-    setPrivacyStatus(`${message}${cacheWarning ? `；${cacheWarning}` : ''}`)
+    setPrivacyStatus(message)
     showToast(message, 7000)
   } finally {
     refreshInProgress = false
@@ -623,26 +575,31 @@ async function updateFamilySafetyPreference(): Promise<void> {
   }
 }
 
-function updateRemoteLogoPreference(): void {
+async function updateRemoteLogoPreference(): Promise<void> {
   if (familySafetyEnabled) {
     disableRemoteLogos()
     setPrivacyStatus('家庭安全模式下不能开启远程台标。')
     showToast('家庭安全模式已阻止远程台标')
     return
   }
-  remoteLogosEnabled = elements.remoteLogoToggle.checked
-  if (!remoteLogosEnabled) clearRemoteLogoResources()
-  writeStoredBoolean(REMOTE_LOGOS_KEY, remoteLogosEnabled)
-  syncSafetyControls()
-  renderVirtualRows()
-  const channel = getChannel(selectedChannelId)
-  if (channel) renderChannelDetail(channel)
+  const requested = elements.remoteLogoToggle.checked
+  try {
+    applySafetyState(await safetyClient.setRemoteLogos(requested))
+    renderVirtualRows()
+    const channel = getChannel(selectedChannelId)
+    if (channel) renderChannelDetail(channel)
 
-  const message = remoteLogosEnabled
-    ? '远程台标已开启；台标图片将由本机直接请求第三方主机。'
-    : '远程台标已关闭；频道列表将只显示本地文字或旗帜占位。'
-  setPrivacyStatus(message)
-  showToast(remoteLogosEnabled ? '已开启远程台标' : '已关闭远程台标')
+    const message = remoteLogosEnabled
+      ? '远程台标已开启；台标图片将由本机直接请求第三方主机。'
+      : '远程台标已关闭；频道列表将只显示本地文字或旗帜占位。'
+    setPrivacyStatus(message)
+    showToast(remoteLogosEnabled ? '已开启远程台标' : '已关闭远程台标')
+  } catch (error) {
+    elements.remoteLogoToggle.checked = remoteLogosEnabled
+    const message = `远程台标设置失败：${errorMessage(error)}`
+    setPrivacyStatus(message)
+    showToast(message, 6000)
+  }
 }
 
 async function clearCatalogCacheFromSettings(): Promise<void> {
@@ -1035,10 +992,11 @@ function updateCatalogStatus(status: CacheStatus, count: number): void {
     network: `已同步 iptv-org · ${formatCount(count)} 台`,
     'fresh-cache': `本机目录 · ${formatCount(count)} 台`,
     'stale-cache': `离线缓存 · ${formatCount(count)} 台`,
+    'legacy-cache': `旧版离线缓存 · ${formatCount(count)} 台`,
     'offline-sample': `离线样例 · ${formatCount(count)} 台`
   }
   elements.catalogState.textContent = `${labels[status]}${familySafetyEnabled ? ' · 家庭安全' : ''}`
-  elements.catalogState.classList.toggle('warning', status === 'stale-cache' || status === 'offline-sample')
+  elements.catalogState.classList.toggle('warning', status === 'stale-cache' || status === 'legacy-cache' || status === 'offline-sample')
 }
 
 function renderCatalogStats(value: Catalog): void {
@@ -1144,7 +1102,7 @@ async function openOfflineDemo(): Promise<void> {
   elements.refreshCatalog.disabled = true
   beginCatalogSync('正在打开离线演示…')
   try {
-    const result = await window.tvFeed.loadOfflineDemo(familySafetyEnabled)
+    const result = await window.tvFeed.loadOfflineDemo()
     applyCatalog(result)
     showToast('已打开离线演示；这些是虚构样例，不是 iptv-org 真实频道')
   } catch (error) {
@@ -1302,68 +1260,11 @@ function required<T extends Element>(selector: string): T {
   return element
 }
 
-function readStoredArray(key: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? '[]')
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
-  } catch {
-    return []
-  }
-}
-
 function readStoredSourceHealth() {
   try {
     return parseSourceHealthStore(localStorage.getItem(SOURCE_HEALTH_KEY))
   } catch {
     return new Map()
-  }
-}
-
-function writeStoredArray(key: string, value: string[]): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value))
-  } catch {
-    // Preferences are optional; the player remains usable when storage is unavailable.
-  }
-}
-
-function readStoredString(key: string): string {
-  try {
-    return localStorage.getItem(key) ?? ''
-  } catch {
-    return ''
-  }
-}
-
-function writeStoredString(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value)
-  } catch {
-    // See writeStoredArray.
-  }
-}
-
-function readStoredBoolean(key: string): boolean {
-  try {
-    return localStorage.getItem(key) === 'true'
-  } catch {
-    return false
-  }
-}
-
-function writeStoredBoolean(key: string, value: boolean): void {
-  try {
-    localStorage.setItem(key, String(value))
-  } catch {
-    // See writeStoredArray.
-  }
-}
-
-function removeStoredValue(key: string): void {
-  try {
-    localStorage.removeItem(key)
-  } catch {
-    // See writeStoredArray.
   }
 }
 

@@ -11,7 +11,7 @@ import type {
   RemoteResourceKind,
   RemoteResourceResponse,
   RemoteResourceStreamTicket
-} from '../../shared/contracts.ts'
+} from '../../shared/remote-resource-contracts.ts'
 
 let requestSequence = 0
 const MAX_STREAM_BYTES = 32 * 1_024 * 1_024

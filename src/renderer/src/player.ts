@@ -1,5 +1,5 @@
 import Hls from 'hls.js'
-import type { CatalogSource } from '../../shared/contracts.ts'
+import type { CatalogSource } from '../../shared/catalog-contracts.ts'
 import {
   classifyPlaybackDiagnostic,
   type PlaybackDiagnostic

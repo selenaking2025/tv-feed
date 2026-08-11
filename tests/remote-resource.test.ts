@@ -5,7 +5,7 @@ import {
   REMOTE_RESOURCE_LIMITS,
   validateRemoteResourceRequest
 } from '../src/main/remote-resource-service.ts'
-import type { RemoteResourceKind, RemoteResourceRequest } from '../src/shared/contracts.ts'
+import type { RemoteResourceKind, RemoteResourceRequest } from '../src/shared/remote-resource-contracts.ts'
 import type { SecureFetchOptions, SecureFetchResult } from '../src/main/secure-network.ts'
 
 test('HLS 播放列表、JSON、分片/密钥和 Logo 全部经过同一个安全请求接口', async () => {

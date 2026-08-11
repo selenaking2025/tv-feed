@@ -1,9 +1,11 @@
-import { OFFICIAL_SOURCE_POLICIES } from './official-sources.ts'
+import { OFFICIAL_SOURCE_POLICIES, officialSourcePolicy } from './official-sources.ts'
 
 export interface FamilyApprovedChannel {
   channelId: string
   scope: 'iptv-org' | 'offline-sample'
   reviewedAt: string
+  reviewAfter: string
+  evidenceReference: string
 }
 
 // This allowlist is intentionally explicit. Adding an official-source policy
@@ -48,9 +50,23 @@ export function familyApprovalHasIndependentOfficialReview(channelId: string): b
 }
 
 function approved(channelId: string): FamilyApprovedChannel {
-  return Object.freeze({ channelId, scope: 'iptv-org', reviewedAt: '2026-08-10' })
+  const evidenceReference = officialSourcePolicy(channelId)?.officialWebsite
+  if (!evidenceReference) throw new Error(`家庭安全频道 ${channelId} 缺少独立官方来源核对`)
+  return Object.freeze({
+    channelId,
+    scope: 'iptv-org',
+    reviewedAt: '2026-08-10',
+    reviewAfter: '2027-02-10',
+    evidenceReference
+  })
 }
 
 function approvedSample(channelId: string): FamilyApprovedChannel {
-  return Object.freeze({ channelId, scope: 'offline-sample', reviewedAt: '2026-08-10' })
+  return Object.freeze({
+    channelId,
+    scope: 'offline-sample',
+    reviewedAt: '2026-08-10',
+    reviewAfter: '2027-02-10',
+    evidenceReference: 'repository:src/shared/sample-catalog.ts'
+  })
 }

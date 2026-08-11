@@ -116,9 +116,17 @@ export interface Catalog {
   stats: CatalogStats
 }
 
-export type CacheStatus = 'network' | 'fresh-cache' | 'stale-cache' | 'offline-sample'
+export type CatalogScope = 'standard' | 'family'
+export type CatalogLoadIntent = 'startup' | 'refresh'
+
+export interface CatalogLoadCommand {
+  intent: CatalogLoadIntent
+}
+
+export type CacheStatus = 'network' | 'fresh-cache' | 'stale-cache' | 'legacy-cache' | 'offline-sample'
 
 export interface CatalogLoadResult {
+  operationId: string
   catalog: Catalog
   cacheStatus: CacheStatus
   warning: string
@@ -133,11 +141,15 @@ export type CatalogSyncStage =
   | 'writing-cache'
   | 'verifying-cache'
 
-export interface CatalogSyncProgress {
+export interface CatalogSyncProgressUpdate {
   stage: CatalogSyncStage
   message: string
   attempt?: number
   maxAttempts?: number
+}
+
+export interface CatalogSyncProgress extends CatalogSyncProgressUpdate {
+  operationId: string
 }
 
 export type CatalogFailureCode =
@@ -163,40 +175,3 @@ export interface CatalogLoadFailure {
 export type CatalogLoadResponse =
   | { ok: true; result: CatalogLoadResult }
   | { ok: false; failure: CatalogLoadFailure }
-
-export type RemoteResourceKind = 'hls-playlist' | 'hls-json' | 'hls-binary' | 'logo'
-
-export interface RemoteResourceRequest {
-  requestId: string
-  url: string
-  kind: RemoteResourceKind
-  rangeStart?: number
-  rangeEnd?: number
-}
-
-export interface RemoteResourceResponse {
-  body: Uint8Array
-  contentType: string
-  finalUrl: string
-  statusCode: number
-  connectionReused?: boolean
-}
-
-export interface RemoteResourceStreamTicket {
-  streamUrl: string
-}
-
-export interface TvFeedBridge {
-  platform: NodeJS.Platform
-  loadCatalog(forceRefresh?: boolean, familySafety?: boolean): Promise<CatalogLoadResponse>
-  loadOfflineDemo(familySafety?: boolean): Promise<CatalogLoadResult>
-  onCatalogSyncProgress(listener: (progress: CatalogSyncProgress) => void): () => void
-  clearCatalogCache(): Promise<boolean>
-  fetchRemoteResource(request: RemoteResourceRequest): Promise<RemoteResourceResponse>
-  prepareRemoteResourceStream(request: RemoteResourceRequest): Promise<RemoteResourceStreamTicket>
-  cancelRemoteResource(requestId: string): void
-  getAppVersion(): Promise<string>
-  setPlayerFullscreen(fullscreen: boolean): Promise<boolean>
-  onPlayerFullscreenChange(listener: (fullscreen: boolean) => void): () => void
-  signalRendererReady(): void
-}

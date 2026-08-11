@@ -37,11 +37,14 @@ if (process.env.TVFEED_SMOKE_CATALOG_CACHE) {
   if (!cacheInfo.isFile() || cacheInfo.size <= 0 || cacheInfo.size > 64 * 1_024 * 1_024) {
     throw new Error('验收目录缓存不存在或超过 64 MiB 安全上限')
   }
-  await copyFile(process.env.TVFEED_SMOKE_CATALOG_CACHE, join(smokeUserDataPath, 'catalog-v1.json'))
+  const suppliedCache = JSON.parse(await readFile(process.env.TVFEED_SMOKE_CATALOG_CACHE, 'utf8'))
+  const destinationName = suppliedCache?.schemaVersion === 2 ? 'catalog-v2.json' : 'catalog-v1.json'
+  await copyFile(process.env.TVFEED_SMOKE_CATALOG_CACHE, join(smokeUserDataPath, destinationName))
 }
 
 const childEnvironment = {
   ...process.env,
+  TVFEED_SMOKE_DRIVER_PATH: resolve(projectRoot, 'scripts/smoke-driver.mjs'),
   TVFEED_SMOKE_OFFLINE_DEMO: liveCatalog ? '0' : '1',
   TVFEED_SMOKE_OUTPUT: screenshotPath,
   TVFEED_SMOKE_USER_DATA: smokeUserDataPath
@@ -141,7 +144,10 @@ if (expectedCatalogFailure) {
   }
   const failureScreenshot = await stat(screenshotPath)
   if (failureScreenshot.size < 50_000) throw new Error(`失败态验收截图异常小：${failureScreenshot.size} bytes`)
-  const failureCacheExists = await stat(join(smokeUserDataPath, 'catalog-v1.json')).then(() => true, () => false)
+  const failureCacheExists = await Promise.all([
+    stat(join(smokeUserDataPath, 'catalog-v1.json')).then(() => true, () => false),
+    stat(join(smokeUserDataPath, 'catalog-v2.json')).then(() => true, () => false)
+  ]).then((values) => values.some(Boolean))
   if (failureCacheExists) throw new Error('联网失败验收意外生成了频道缓存')
   process.stdout.write(`Electron 联网失败态验收通过：${screenshotPath}（${failureScreenshot.size} bytes）\n`)
   process.exit(0)
@@ -231,15 +237,19 @@ if (!checks.gridColumns || checks.gridColumns === 'none') throw new Error(`双�
 const screenshot = await stat(screenshotPath)
 if (screenshot.size < 50_000) throw new Error(`验收截图异常小：${screenshot.size} bytes`)
 
-const cacheExists = await stat(join(smokeUserDataPath, 'catalog-v1.json')).then(() => true, () => false)
+const cacheExists = await stat(join(smokeUserDataPath, 'catalog-v2.json')).then(() => true, () => false)
 if (!liveCatalog && cacheExists) {
   throw new Error('离线演示验收意外生成了频道缓存')
 }
 if (liveCatalog && !cacheExists) {
-  throw new Error('真实目录验收没有生成或保留 catalog-v1.json')
+  throw new Error('真实目录验收没有生成或保留 catalog-v2.json')
 }
 if (liveCatalog) {
-  const cached = JSON.parse(await readFile(join(smokeUserDataPath, 'catalog-v1.json'), 'utf8'))
+  const envelope = JSON.parse(await readFile(join(smokeUserDataPath, 'catalog-v2.json'), 'utf8'))
+  if (envelope.schemaVersion !== 2 || envelope.scope !== (familySafetyRequested ? 'family' : 'standard')) {
+    throw new Error(`目录缓存 V2 元数据不正确：${JSON.stringify({ schemaVersion: envelope.schemaVersion, scope: envelope.scope })}`)
+  }
+  const cached = envelope.catalog
   const cachedChannels = Array.isArray(cached.channels) ? cached.channels.length : 0
   const cachedSources = Array.isArray(cached.channels)
     ? cached.channels.reduce((total, channel) => total + (Array.isArray(channel?.sources) ? channel.sources.length : 0), 0)

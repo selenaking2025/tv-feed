@@ -1,6 +1,7 @@
 export interface ProjectDenylistEntry {
   channelId: string
   addedAt: string
+  reviewAfter: string
   reason: 'rights-request' | 'safety' | 'security' | 'other'
   reference: string
 }

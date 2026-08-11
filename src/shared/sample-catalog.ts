@@ -1,4 +1,4 @@
-import type { Catalog, CatalogChannel } from './contracts.ts'
+import type { Catalog, CatalogChannel } from './catalog-contracts.ts'
 import { normalizeRemoteHlsUrl } from './remote-url-policy.ts'
 
 const sampleChannels: CatalogChannel[] = [

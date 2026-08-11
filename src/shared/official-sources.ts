@@ -1,10 +1,11 @@
-import type { CatalogChannel, CatalogSource } from './contracts.ts'
+import type { CatalogChannel, CatalogSource } from './catalog-contracts.ts'
 
 export interface OfficialSourcePolicy {
   channelId: string
   officialWebsite: string
   approvedSourceHosts: readonly string[]
   verifiedAt: string
+  reviewAfter: string
 }
 
 // This deliberately stores channel IDs and exact, manually reviewed hostnames,
@@ -65,6 +66,7 @@ function policy(
     channelId,
     officialWebsite,
     approvedSourceHosts: Object.freeze(approvedSourceHosts.map((host) => host.toLocaleLowerCase())),
-    verifiedAt: '2026-08-10'
+    verifiedAt: '2026-08-10',
+    reviewAfter: '2027-02-10'
   })
 }

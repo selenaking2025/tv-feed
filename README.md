@@ -35,6 +35,8 @@ TV Feed 与 iptv-org、电视台、频道及内容权利人没有隶属、赞助
 
 ## 开发
 
+现行权威边界、目录并发规则、家庭安全恢复流程、缓存 V2 迁移和五阶段优化记录见 [架构文档](docs/ARCHITECTURE.md)。
+
 ```bash
 npm install
 npm run dev
@@ -81,7 +83,7 @@ TVFEED_SMOKE_LIVE=1 TVFEED_SMOKE_FORCE_NETWORK_FAILURE=1 TVFEED_SMOKE_EXPECT_CAT
 也可以把本机已有的目录缓存复制到隔离的临时验收目录中，避免为了 UI 回归测试重复连接 iptv-org；缓存仍会经过应用当前的大小、结构、denylist 和有效期校验，且不会提交到仓库：
 
 ```bash
-TVFEED_SMOKE_LIVE=1 TVFEED_SMOKE_CATALOG_CACHE="/absolute/path/to/catalog-v1.json" npm run smoke
+TVFEED_SMOKE_LIVE=1 TVFEED_SMOKE_CATALOG_CACHE="/absolute/path/to/catalog-v1-or-v2.json" npm run smoke
 ```
 
 如需额外尝试当前选中频道的真实 HLS 播放（会连接第三方直播源）：

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   findForbiddenPathViolations,
+  findArchitectureBoundaryViolations,
   findLockfileRegistryViolations,
   findRendererBoundaryViolations,
   findSecretViolations,
@@ -34,9 +35,10 @@ test('锁文件只接受官方 npm registry', () => {
 
 test('渲染进程网络门禁拒绝直接 fetch 并要求 CSP 和远程台标默认关闭', () => {
   const safeEntries = new Map([
-    ['src/main/index.ts', `const CSP = "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob:;"`],
+    ['src/main/app-protocol.ts', `const CSP = "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob:;"`],
     ['src/renderer/index.html', `<meta content="img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob:;"><link rel="stylesheet" href="/src/phosphor-icons.css" /><link rel="stylesheet" href="/src/styles.css" />`],
-    ['src/renderer/src/main.ts', `let remoteLogosEnabled = readStoredBoolean(REMOTE_LOGOS_KEY)\nfunction readStoredBoolean(key) { return localStorage.getItem(key) === 'true' }`]
+    ['src/renderer/src/main.ts', 'const safetyClient = new SafetyClient(window.tvFeed)'],
+    ['src/renderer/src/safety-client.ts', 'bridge.initializeSafetyState(); state.familySafety; state.remoteLogos']
   ])
   assert.deepEqual(findRendererBoundaryViolations(safeEntries), [])
 
@@ -46,19 +48,55 @@ test('渲染进程网络门禁拒绝直接 fetch 并要求 CSP 和远程台标�
   assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /不得直接使用 fetch/)
   safeEntries.delete('src/renderer/src/secure-hls-loader.ts')
 
-  safeEntries.set('src/renderer/src/main.ts', `let familySafetyEnabled = readStoredBoolean(FAMILY_SAFETY_KEY)\nlet remoteLogosEnabled = !familySafetyEnabled && readStoredBoolean(REMOTE_LOGOS_KEY)\nfunction readStoredBoolean(key) { return localStorage.getItem(key) === 'true' }`)
-  assert.deepEqual(findRendererBoundaryViolations(safeEntries), [])
+  safeEntries.set('src/renderer/src/main.ts', `const safetyClient = new SafetyClient(window.tvFeed)\nlet familySafetyEnabled = readStoredBoolean(FAMILY_SAFETY_KEY)`)
+  assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /不得把旧本地安全偏好/)
+  safeEntries.set('src/renderer/src/main.ts', 'const safetyClient = new SafetyClient(window.tvFeed)')
 
   safeEntries.set('src/renderer/src/direct.ts', 'fetch("https://example.com")')
   assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /不得直接使用 fetch/)
 
   safeEntries.delete('src/renderer/src/direct.ts')
-  safeEntries.set('src/renderer/src/main.ts', `import './styles.css'\nlet remoteLogosEnabled = readStoredBoolean(REMOTE_LOGOS_KEY)\nfunction readStoredBoolean(key) { return localStorage.getItem(key) === 'true' }`)
+  safeEntries.set('src/renderer/src/main.ts', `import './styles.css'\nconst safetyClient = new SafetyClient(window.tvFeed)`)
   assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /不得通过 TypeScript 注入界面样式/)
 
-  safeEntries.set('src/renderer/src/main.ts', `let remoteLogosEnabled = readStoredBoolean(REMOTE_LOGOS_KEY)\nfunction readStoredBoolean(key) { return localStorage.getItem(key) === 'true' }`)
+  safeEntries.set('src/renderer/src/main.ts', 'const safetyClient = new SafetyClient(window.tvFeed)')
   safeEntries.set('src/renderer/index.html', `<meta content="img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob:;">`)
   assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /必须通过 HTML 外链加载/)
+})
+
+test('架构门禁固定共享契约、依赖方向、IPC、运行配置和主入口职责', () => {
+  const architecture = [
+    '<!-- architecture-record:v1 -->',
+    '## 权威与投影',
+    '## 阶段一：目录协调器',
+    '## 阶段二：主进程家庭安全权威',
+    '## 阶段三：目录缓存 V2',
+    '## 阶段四：入口与边界拆分',
+    '## 阶段五：架构守卫与政策生命周期',
+    '## 验证契约'
+  ].join('\n')
+  const safeEntries = new Map([
+    ['docs/ARCHITECTURE.md', architecture],
+    ['src/main/index.ts', 'createMainWindow()'],
+    ['src/main/runtime-config.ts', 'environment.TVFEED_SMOKE_OUTPUT'],
+    ['src/main/catalog-service.ts', 'new CatalogCacheRepository(options)'],
+    ['src/shared/ipc-contract.ts', `const channel = 'catalog:load'`],
+    ['src/renderer/src/main.ts', 'const safetyClient = new SafetyClient(window.tvFeed)']
+  ])
+  assert.deepEqual(findArchitectureBoundaryViolations(safeEntries), [])
+
+  const unsafeEntries = new Map(safeEntries)
+  unsafeEntries.set('src/renderer/src/bypass.ts', `import x from '../../main/index.ts'\nconst channel = 'catalog:load'\nconst flag = process.env.TVFEED_SMOKE_LIVE`)
+  unsafeEntries.set('src/main/index.ts', `import './smoke-driver.ts'\nipcMain.handle(channel, handler)\nprotocol.handle('tvfeed', handler)`)
+  unsafeEntries.set('src/shared/contracts.ts', 'export {}')
+  const violations = findArchitectureBoundaryViolations(unsafeEntries).join('\n')
+  assert.match(violations, /单体共享契约不得恢复/)
+  assert.match(violations, /renderer 层不得依赖/)
+  assert.match(violations, /IPC 通道字面量/)
+  assert.match(violations, /冒烟环境变量/)
+  assert.match(violations, /不得重新承担 IPC 注册职责/)
+  assert.match(violations, /不得重新承担 协议处理职责/)
+  assert.match(violations, /不得重新承担 静态冒烟驱动职责/)
 })
 
 test('基本密钥扫描识别常见凭据而不把普通配置误报为密钥', () => {

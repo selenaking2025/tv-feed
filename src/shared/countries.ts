@@ -1,4 +1,4 @@
-import type { CatalogCountry } from './contracts.ts'
+import type { CatalogCountry } from './catalog-contracts.ts'
 
 const countryNameCollator = new Intl.Collator('en', {
   numeric: true,
