@@ -35,7 +35,7 @@ test('锁文件只接受官方 npm registry', () => {
 test('渲染进程网络门禁拒绝直接 fetch 并要求 CSP 和远程台标默认关闭', () => {
   const safeEntries = new Map([
     ['src/main/index.ts', `const CSP = "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob:;"`],
-    ['src/renderer/index.html', `<meta content="img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob:;">`],
+    ['src/renderer/index.html', `<meta content="img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob:;"><link rel="stylesheet" href="/src/phosphor-icons.css" /><link rel="stylesheet" href="/src/styles.css" />`],
     ['src/renderer/src/main.ts', `let remoteLogosEnabled = readStoredBoolean(REMOTE_LOGOS_KEY)\nfunction readStoredBoolean(key) { return localStorage.getItem(key) === 'true' }`]
   ])
   assert.deepEqual(findRendererBoundaryViolations(safeEntries), [])
@@ -45,6 +45,14 @@ test('渲染进程网络门禁拒绝直接 fetch 并要求 CSP 和远程台标�
 
   safeEntries.set('src/renderer/src/direct.ts', 'fetch("https://example.com")')
   assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /不得直接使用 fetch/)
+
+  safeEntries.delete('src/renderer/src/direct.ts')
+  safeEntries.set('src/renderer/src/main.ts', `import './styles.css'\nlet remoteLogosEnabled = readStoredBoolean(REMOTE_LOGOS_KEY)\nfunction readStoredBoolean(key) { return localStorage.getItem(key) === 'true' }`)
+  assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /不得通过 TypeScript 注入界面样式/)
+
+  safeEntries.set('src/renderer/src/main.ts', `let remoteLogosEnabled = readStoredBoolean(REMOTE_LOGOS_KEY)\nfunction readStoredBoolean(key) { return localStorage.getItem(key) === 'true' }`)
+  safeEntries.set('src/renderer/index.html', `<meta content="img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob:;">`)
+  assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /必须通过 HTML 外链加载/)
 })
 
 test('基本密钥扫描识别常见凭据而不把普通配置误报为密钥', () => {

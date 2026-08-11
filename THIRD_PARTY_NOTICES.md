@@ -9,6 +9,7 @@ TV Feed 自有代码和自有素材采用 MIT License；该许可证不覆盖本
 | 组件 | 当前版本 | 用途 | 许可证 | 随包声明 |
 | --- | ---: | --- | --- | --- |
 | [Electron](https://github.com/electron/electron) | 43.3.0 | 桌面运行时 | MIT | `third_party_licenses/Electron-LICENSE.txt` |
+| [@phosphor-icons/web](https://github.com/phosphor-icons/web) | 2.1.2 | 应用界面图标 | MIT | `third_party_licenses/Phosphor-Icons-LICENSE.txt` |
 | [hls.js](https://github.com/video-dev/hls.js) | 1.6.17 | 在 Chromium 中播放 HLS | Apache-2.0 | `third_party_licenses/hls.js-LICENSE.txt`、`third_party_licenses/Apache-2.0.txt` |
 
 Electron 运行时还包含 Chromium、Node.js、V8、FFmpeg 以及其他第三方组件。它们的逐项版权与许可证由 Electron 随附的 `LICENSES.chromium.html` 汇总。TV Feed 的打包配置会把该文件原样保留为：

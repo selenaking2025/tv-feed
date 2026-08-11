@@ -1,4 +1,3 @@
-import './styles.css'
 import { applyFamilySafetyAllowlist } from '../../shared/catalog.ts'
 import {
   appendChannelNumberDigit,
@@ -1118,8 +1117,8 @@ function getChannel(channelId: string): CatalogChannel | undefined {
 }
 
 function sourceLabel(source: CatalogSource, index: number): string {
-  const details = [source.quality, source.label, source.feed].filter(Boolean).join(' · ')
-  return `线路 ${index + 1}${details ? ` · ${details}` : ''}`
+  const details = [source.quality, source.label, source.feed].filter(Boolean).join(' / ')
+  return `线路 ${index + 1}${details ? ` / ${details}` : ''}`
 }
 
 function createOfficialBadge(label = '官方源'): HTMLElement {
@@ -1221,14 +1220,16 @@ function emptyMessage(): string {
   return '没有找到符合条件的频道，请换个关键词或清除筛选。'
 }
 
-function createStarIcon(): SVGElement {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-  svg.setAttribute('viewBox', '0 0 24 24')
-  svg.setAttribute('aria-hidden', 'true')
-  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-  path.setAttribute('d', 'm12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z')
-  svg.append(path)
-  return svg
+function createStarIcon(): HTMLElement {
+  const wrapper = document.createElement('span')
+  wrapper.className = 'favorite-icon'
+  wrapper.setAttribute('aria-hidden', 'true')
+  const outline = document.createElement('i')
+  outline.className = 'ph ph-star'
+  const filled = document.createElement('i')
+  filled.className = 'ph-fill ph-star'
+  wrapper.append(outline, filled)
+  return wrapper
 }
 
 function showToast(message: string, duration = 3200): void {

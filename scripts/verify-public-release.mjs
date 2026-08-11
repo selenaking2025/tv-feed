@@ -12,6 +12,7 @@ const REQUIRED_FILES = [
   'docs/PUBLIC_RELEASE.md',
   'third_party_licenses/Apache-2.0.txt',
   'third_party_licenses/Electron-LICENSE.txt',
+  'third_party_licenses/Phosphor-Icons-LICENSE.txt',
   'third_party_licenses/hls.js-LICENSE.txt'
 ]
 
@@ -109,6 +110,10 @@ export function findPublicReleaseSnapshotViolations({ files, entries }) {
   const electronLicense = entries.get('third_party_licenses/Electron-LICENSE.txt') ?? ''
   if (!electronLicense.includes('Electron contributors') || !electronLicense.includes('Permission is hereby granted')) {
     violations.push('third_party_licenses/Electron-LICENSE.txt: Electron MIT 声明不完整')
+  }
+  const phosphorLicense = entries.get('third_party_licenses/Phosphor-Icons-LICENSE.txt') ?? ''
+  if (!phosphorLicense.includes('Phosphor Icons') || !phosphorLicense.includes('Permission is hereby granted')) {
+    violations.push('third_party_licenses/Phosphor-Icons-LICENSE.txt: Phosphor Icons MIT 声明不完整')
   }
 
   violations.push(...findMarketingViolations(`${legal}\n${privacy}\n${security}\n${publicChecklist}`, '公开政策文件'))

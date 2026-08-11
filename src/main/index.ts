@@ -54,9 +54,11 @@ app.on('window-all-closed', () => {
 
 function createMainWindow(): void {
   const preloadPath = fileURLToPath(new URL('../preload/index.cjs', import.meta.url))
+  const windowWidth = smokeWindowDimension('TVFEED_SMOKE_WIDTH', 1440, 820, 2400)
+  const windowHeight = smokeWindowDimension('TVFEED_SMOKE_HEIGHT', 900, 620, 1600)
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
+    width: windowWidth,
+    height: windowHeight,
     minWidth: 820,
     minHeight: 620,
     show: false,
@@ -123,6 +125,12 @@ function createMainWindow(): void {
   } else {
     void mainWindow.loadURL(`${APP_SCHEME}://${APP_HOST}/`).catch(reportLoadError)
   }
+}
+
+function smokeWindowDimension(name: string, fallback: number, minimum: number, maximum: number): number {
+  if (!process.env.TVFEED_SMOKE_OUTPUT) return fallback
+  const value = Number(process.env[name])
+  return Number.isInteger(value) && value >= minimum && value <= maximum ? value : fallback
 }
 
 function reportLoadError(error: unknown): void {

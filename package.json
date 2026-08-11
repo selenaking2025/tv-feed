@@ -28,6 +28,7 @@
     "dist:mac": "npm run build && electron-builder --mac dmg --arm64 --publish never"
   },
   "dependencies": {
+    "@phosphor-icons/web": "2.1.2",
     "hls.js": "1.6.17"
   },
   "devDependencies": {

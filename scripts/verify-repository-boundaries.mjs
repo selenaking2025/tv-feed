@@ -122,7 +122,17 @@ export function findRendererBoundaryViolations(entries) {
     }
   }
 
+  const rendererHtml = entries.get('src/renderer/index.html') ?? ''
+  for (const stylesheet of ['/src/phosphor-icons.css', '/src/styles.css']) {
+    if (!rendererHtml.includes(`<link rel="stylesheet" href="${stylesheet}" />`)) {
+      violations.push(`src/renderer/index.html: 严格 CSP 下必须通过 HTML 外链加载 ${stylesheet}`)
+    }
+  }
+
   const rendererMain = entries.get('src/renderer/src/main.ts') ?? ''
+  if (/import\s+['"]\.\/(?:phosphor-icons|styles)\.css['"]/.test(rendererMain)) {
+    violations.push('src/renderer/src/main.ts: 严格 CSP 的开发模式不得通过 TypeScript 注入界面样式')
+  }
   if (!/let\s+remoteLogosEnabled\s*=\s*(?:!familySafetyEnabled\s*&&\s*)?readStoredBoolean\(REMOTE_LOGOS_KEY\)/.test(rendererMain)) {
     violations.push('src/renderer/src/main.ts: 远程台标必须从默认关闭的本地布尔偏好读取')
   }

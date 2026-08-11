@@ -8,6 +8,8 @@
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
+    <link rel="stylesheet" href="/src/phosphor-icons.css" />
+    <link rel="stylesheet" href="/src/styles.css" />
     <title>TV Feed</title>
   </head>
   <body>
@@ -28,10 +30,10 @@
         <div class="titlebar-actions">
           <span class="catalog-state" id="catalog-state">正在整理频道…</span>
           <button class="icon-button" id="sidebar-toggle" type="button" aria-label="显示频道目录" aria-controls="channel-pane" aria-expanded="true" title="显示频道目录">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16m4-11 3 3-3 3" /></svg>
+            <i class="ph ph-sidebar-simple" aria-hidden="true"></i>
           </button>
           <button class="icon-button" id="refresh-catalog" type="button" aria-label="更新频道目录" title="更新频道目录">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M18.2 9A7 7 0 0 0 6.4 6.4L4 9m16 6-2.4 2.6A7 7 0 0 1 5.8 15" /></svg>
+            <i class="ph ph-arrows-clockwise" aria-hidden="true"></i>
           </button>
         </div>
       </header>
@@ -40,16 +42,16 @@
         <aside class="channel-pane" id="channel-pane" aria-label="频道目录">
           <div class="pane-heading">
             <div>
-              <p class="eyebrow">CHANNEL GUIDE</p>
+              <p class="pane-label">频道目录</p>
               <h1>现在看什么？</h1>
             </div>
             <button class="icon-button pane-close" id="sidebar-close" type="button" aria-label="隐藏频道目录" aria-controls="channel-pane" title="隐藏频道目录">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16m7-11-3 3 3 3" /></svg>
+              <i class="ph ph-sidebar-simple" aria-hidden="true"></i>
             </button>
           </div>
 
           <div class="search-box">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg>
+            <i class="ph ph-magnifying-glass" aria-hidden="true"></i>
             <label class="sr-only" for="channel-search">搜索频道</label>
             <input id="channel-search" type="search" placeholder="频道、国家或分类…" autocomplete="off" aria-label="搜索频道" />
             <kbd aria-hidden="true">/</kbd>
@@ -59,7 +61,7 @@
             <button type="button" data-view="all" aria-pressed="true">全部</button>
             <button type="button" data-view="chinese" aria-pressed="false">中文</button>
             <button type="button" data-view="favorites" aria-pressed="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z" /></svg>
+              <i class="ph ph-star" aria-hidden="true"></i>
               收藏
             </button>
             <button type="button" data-view="recent" aria-pressed="false">最近</button>
@@ -103,7 +105,7 @@
 
           <footer class="pane-footer">
             <span class="safety-badge">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 7 3v5c0 4.6-2.8 8-7 10-4.2-2-7-5.4-7-10V6Z" /><path d="m9 12 2 2 4-5" /></svg>
+              <i class="ph ph-shield-check" aria-hidden="true"></i>
               <span id="safety-badge-label">按上游标记过滤</span>
             </span>
             <button type="button" id="catalog-info">数据说明</button>
@@ -124,12 +126,12 @@
                   <span class="orbit orbit-one"></span>
                   <span class="orbit orbit-two"></span>
                   <span class="screen-glyph">
-                    <svg viewBox="0 0 64 64"><rect x="11" y="16" width="42" height="31" rx="5" /><path d="m23 55 4-8h10l4 8M25 28l7 4 7-4v9l-7 4-7-4Z" /></svg>
+                    <i class="ph ph-television-simple"></i>
                   </span>
                 </div>
-                <p class="player-kicker">从左侧选择频道</p>
+                <p class="player-kicker">先选择频道</p>
                 <strong>浏览频道，选择线路，在本机播放</strong>
-                <small>播放时你的设备会直接连接第三方源站；线路可用性会变化。</small>
+                <small>视频由你的设备直接连接第三方源站，线路可用性可能变化。</small>
               </div>
 
               <div class="player-status-overlay" id="player-status-overlay" role="status" aria-live="polite" aria-atomic="true" hidden>
@@ -147,27 +149,27 @@
             <div class="player-controls" aria-label="播放控制">
               <div class="control-group">
                 <button class="round-control" id="previous-channel" type="button" aria-label="上一个频道" title="上一个频道（K）">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14M18 6l-8 6 8 6Z" /></svg>
+                  <i class="ph ph-skip-back" aria-hidden="true"></i>
                 </button>
                 <button class="primary-control" id="toggle-play" type="button" aria-label="播放" title="播放或暂停（空格）">
-                  <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z" /></svg>
-                  <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14" /></svg>
+                  <i class="ph-fill ph-play play-icon" aria-hidden="true"></i>
+                  <i class="ph-fill ph-pause pause-icon" aria-hidden="true"></i>
                 </button>
                 <button class="round-control" id="next-channel" type="button" aria-label="下一个频道" title="下一个频道（J）">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 5v14M6 6l8 6-8 6Z" /></svg>
+                  <i class="ph ph-skip-forward" aria-hidden="true"></i>
                 </button>
               </div>
 
               <div class="control-group control-group-end">
                 <button class="round-control" id="stop-player" type="button" aria-label="停止播放" title="停止播放">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1" /></svg>
+                  <i class="ph ph-stop" aria-hidden="true"></i>
                 </button>
                 <button class="round-control" id="picture-in-picture" type="button" aria-label="画中画" title="画中画（P）">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" /><rect x="12" y="11" width="6" height="5" rx="1" /></svg>
+                  <i class="ph ph-picture-in-picture" aria-hidden="true"></i>
                 </button>
                 <button class="round-control" id="fullscreen-player" type="button" aria-label="全屏" title="全屏（F）">
-                  <svg class="enter-fullscreen-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" /></svg>
-                  <svg class="exit-fullscreen-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5" /></svg>
+                  <i class="ph ph-corners-out enter-fullscreen-icon" aria-hidden="true"></i>
+                  <i class="ph ph-corners-in exit-fullscreen-icon" aria-hidden="true"></i>
                 </button>
               </div>
             </div>
@@ -183,17 +185,14 @@
               </div>
             </div>
             <button class="favorite-button" id="favorite-channel" type="button" aria-pressed="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z" /></svg>
+              <i class="ph ph-star" aria-hidden="true"></i>
               <span>收藏</span>
             </button>
           </div>
 
           <section class="source-section" aria-labelledby="source-heading">
             <div class="section-heading">
-              <div>
-                <p class="eyebrow">SIGNAL SOURCES</p>
-                <h3 id="source-heading">播放线路</h3>
-              </div>
+              <h3 id="source-heading">播放线路</h3>
               <div class="source-guidance">
                 <p id="source-help">选台后会显示候选线路；失败时自动尝试下一条。</p>
                 <p class="channel-health" id="channel-health" data-state="not-checked" role="status" aria-live="polite" aria-atomic="true">选择并播放后检测</p>
@@ -208,7 +207,7 @@
           <section class="shortcut-strip" aria-label="键盘快捷键">
             <span><kbd>/</kbd> 搜索</span>
             <span><kbd>↑</kbd><kbd>↓</kbd> 换台</span>
-            <span><kbd>0–9</kbd> 数字选台</span>
+            <span><kbd>0-9</kbd> 数字选台</span>
             <span><kbd>Space</kbd> 播放 / 暂停</span>
             <span><kbd>M</kbd> 静音</span>
             <span><kbd>−</kbd><kbd>+</kbd> 音量</span>
@@ -221,12 +220,9 @@
 
     <dialog class="info-dialog" id="info-dialog" aria-labelledby="info-title">
       <div class="dialog-heading">
-        <div>
-          <p class="eyebrow">ABOUT THE CATALOG</p>
-          <h2 id="info-title">数据说明</h2>
-        </div>
+        <h2 id="info-title">数据说明</h2>
         <button class="icon-button" id="dialog-close" type="button" aria-label="关闭数据说明">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+          <i class="ph ph-x" aria-hidden="true"></i>
         </button>
       </div>
       <div class="dialog-copy">
