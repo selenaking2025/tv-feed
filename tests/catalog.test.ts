@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyProjectDenylist, isExplicitlySafeChannel, normalizeBrowserHlsUrl, transformIptvData } from '../src/shared/catalog.ts'
+import { applyFamilySafetyAllowlist, applyProjectDenylist, isExplicitlySafeChannel, normalizeBrowserHlsUrl, transformIptvData } from '../src/shared/catalog.ts'
 import { displayCountryName, getCountrySearchAliases, sortCountriesForDisplay } from '../src/shared/countries.ts'
+import { FAMILY_APPROVED_CHANNELS, FAMILY_APPROVED_CHANNEL_IDS, familyApprovalHasIndependentOfficialReview } from '../src/shared/family-safety.ts'
 import { createHlsAcceptanceCatalog, createOfflineSampleCatalog } from '../src/shared/sample-catalog.ts'
 import type { UpstreamBundle, UpstreamChannel } from '../src/shared/contracts.ts'
 
@@ -164,6 +165,33 @@ test('项目 denylist 会从旧目录缓存中移除频道并重建统计与筛�
     filtered.countries.reduce((total, country) => total + country.count, 0),
     filtered.channels.length
   )
+})
+
+test('家庭安全模式只返回本地允许频道、移除远程 Logo 并重建统计与筛选项', () => {
+  const catalog = createOfflineSampleCatalog('2026-08-10T00:00:00.000Z')
+  const approved = catalog.channels[0]
+  assert.ok(approved)
+  const withRemoteLogo = {
+    ...catalog,
+    channels: catalog.channels.map((item) => item.id === approved.id ? { ...item, logoUrl: 'https://images.example.com/logo.png' } : item)
+  }
+
+  const filtered = applyFamilySafetyAllowlist(withRemoteLogo, new Set([approved.id]))
+  assert.deepEqual(filtered.channels.map((item) => item.id), [approved.id])
+  assert.equal(filtered.channels[0]?.logoUrl, '')
+  assert.equal(filtered.stats.channels, 1)
+  assert.equal(filtered.stats.candidateStreams, approved.sources.length)
+  assert.equal(filtered.stats.excludedFamilySafety, catalog.stats.candidateStreams - approved.sources.length)
+  assert.equal(filtered.countries.reduce((total, country) => total + country.count, 0), 1)
+})
+
+test('家庭允许列表是显式、无重复并与官方源审核相互独立的本地政策', () => {
+  assert.equal(FAMILY_APPROVED_CHANNEL_IDS.size, FAMILY_APPROVED_CHANNELS.length)
+  assert.ok(FAMILY_APPROVED_CHANNELS.some((entry) => entry.scope === 'offline-sample'))
+  assert.ok(FAMILY_APPROVED_CHANNELS.some((entry) => entry.scope === 'iptv-org'))
+  assert.ok(FAMILY_APPROVED_CHANNELS
+    .filter((entry) => entry.scope === 'iptv-org')
+    .every((entry) => familyApprovalHasIndependentOfficialReview(entry.channelId)))
 })
 
 test('地区菜单将中国置顶，其余国家按英文名称排序，并支持中文搜索别名', () => {

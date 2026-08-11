@@ -126,9 +126,9 @@ function sanitizeDiagnostic(value: string): string {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('catalog:load', (event, forceRefresh: unknown) => {
+  ipcMain.handle('catalog:load', (event, forceRefresh: unknown, familySafety: unknown) => {
     assertTrustedSender(event.senderFrame?.url ?? '')
-    return loadCatalog(forceRefresh === true)
+    return loadCatalog(forceRefresh === true, familySafety === true)
   })
   ipcMain.handle('catalog:clear-cache', (event) => {
     assertTrustedSender(event.senderFrame?.url ?? '')
@@ -277,6 +277,7 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
 
   try {
     const playbackCheck = await runPlaybackCheck(webContents)
+    const familySafetyCheck = await runFamilySafetyCheck(webContents)
     const directExternalFetchBlocked: unknown = await webContents.executeJavaScript(
       `fetch('https://127.0.0.1/tv-feed-security-smoke').then(() => false, () => true)`
     )
@@ -303,6 +304,7 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         remoteLogos: localStorage.getItem('tvfeed:remote-logos:v1')
       }
       const remoteLogoToggle = document.querySelector('#remote-logo-toggle')
+      const familySafetyToggle = document.querySelector('#family-safety-toggle')
       const favoriteBefore = favorite?.getAttribute('aria-pressed')
       favorite?.click()
       const favoriteToggleWorks = Boolean(favoriteBefore && favorite?.getAttribute('aria-pressed') !== favoriteBefore)
@@ -340,6 +342,9 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         sourceButtons: sourceButtons.length,
         storageBeforeInteraction,
         remoteLogoChecked: remoteLogoToggle instanceof HTMLInputElement ? remoteLogoToggle.checked : null,
+        remoteLogoDisabled: remoteLogoToggle instanceof HTMLInputElement ? remoteLogoToggle.disabled : null,
+        familySafetyChecked: familySafetyToggle instanceof HTMLInputElement ? familySafetyToggle.checked : null,
+        familySafetyBadge: document.querySelector('#safety-badge-label')?.textContent ?? '',
         noAutoplay: video instanceof HTMLVideoElement ? video.paused && !video.currentSrc : false,
         countryOptions,
         chinaSearchResult,
@@ -355,6 +360,7 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
     const result = {
       ...(domResult && typeof domResult === 'object' ? domResult : {}),
       playbackCheck,
+      familySafetyCheck,
       directExternalFetchBlocked: directExternalFetchBlocked === true,
       packaged: app.isPackaged,
       appName: app.getName(),
@@ -371,6 +377,61 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
   } finally {
     setTimeout(() => app.quit(), 100)
   }
+}
+
+async function runFamilySafetyCheck(webContents: Electron.WebContents): Promise<Record<string, unknown>> {
+  if (process.env.TVFEED_SMOKE_FAMILY !== '1') return { attempted: false }
+
+  await webContents.executeJavaScript(`document.querySelector('#family-safety-toggle')?.click()`)
+  let state: Record<string, unknown> = { attempted: true, passed: false }
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    const snapshot: unknown = await webContents.executeJavaScript(`(() => {
+      const family = document.querySelector('#family-safety-toggle')
+      const remote = document.querySelector('#remote-logo-toggle')
+      const familyNote = document.querySelector('#family-safety-note')?.textContent ?? ''
+      const manualImportControls = document.querySelectorAll('[data-manual-url-import], input[type="url"]').length
+      return {
+        familyChecked: family instanceof HTMLInputElement ? family.checked : null,
+        familyDisabled: family instanceof HTMLInputElement ? family.disabled : null,
+        familyStored: localStorage.getItem('tvfeed:family-safety:v1'),
+        recentsStored: localStorage.getItem('tvfeed:recents:v1'),
+        remoteChecked: remote instanceof HTMLInputElement ? remote.checked : null,
+        remoteDisabled: remote instanceof HTMLInputElement ? remote.disabled : null,
+        remoteStored: localStorage.getItem('tvfeed:remote-logos:v1'),
+        remoteLogoImages: document.querySelectorAll('img[data-remote-logo="true"]').length,
+        manualImportControls,
+        disclaimerPresent: familyNote.includes('不是儿童绝对安全保证'),
+        badge: document.querySelector('#safety-badge-label')?.textContent ?? '',
+        catalogState: document.querySelector('#catalog-state')?.textContent ?? '',
+        rows: document.querySelectorAll('[data-channel-row]').length
+      }
+    })()`)
+    state = { attempted: true, ...(snapshot && typeof snapshot === 'object' ? snapshot : {}) }
+    if (
+      state.familyChecked === true &&
+      state.familyDisabled === false &&
+      state.familyStored === 'true' &&
+      state.remoteChecked === false &&
+      state.remoteDisabled === true &&
+      state.remoteStored === 'false' &&
+      state.remoteLogoImages === 0 &&
+      state.manualImportControls === 0 &&
+      state.disclaimerPresent === true &&
+      String(state.badge ?? '').includes('本地允许列表') &&
+      String(state.catalogState ?? '').includes('家庭安全')
+    ) {
+      const dialogOpened = await webContents.executeJavaScript(`(() => {
+        const dialog = document.querySelector('#info-dialog')
+        if (!(dialog instanceof HTMLDialogElement)) return false
+        if (!dialog.open) dialog.showModal()
+        return dialog.open
+      })()`)
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
+      return { ...state, dialogOpened: dialogOpened === true, passed: dialogOpened === true }
+    }
+  }
+  return { ...state, passed: false }
 }
 
 async function runPlaybackCheck(webContents: Electron.WebContents): Promise<Record<string, unknown>> {

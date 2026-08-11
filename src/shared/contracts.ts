@@ -102,6 +102,7 @@ export interface CatalogStats {
   excludedUnsafeChannel: number
   excludedBlockedChannel: number
   excludedBrowserIncompatible: number
+  excludedFamilySafety?: number
 }
 
 export interface Catalog {
@@ -141,7 +142,7 @@ export interface RemoteResourceResponse {
 
 export interface TvFeedBridge {
   platform: NodeJS.Platform
-  loadCatalog(forceRefresh?: boolean): Promise<CatalogLoadResult>
+  loadCatalog(forceRefresh?: boolean, familySafety?: boolean): Promise<CatalogLoadResult>
   clearCatalogCache(): Promise<boolean>
   fetchRemoteResource(request: RemoteResourceRequest): Promise<RemoteResourceResponse>
   cancelRemoteResource(requestId: string): void

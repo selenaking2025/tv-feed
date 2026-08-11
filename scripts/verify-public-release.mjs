@@ -29,9 +29,9 @@ const FORBIDDEN_MARKETING_PATTERNS = [
 ]
 
 const POLICY_MARKERS = {
-  'LEGAL.md': ['项目定位', '与 iptv-org 的关系', '不绕过访问控制', '权利人移除流程', '项目 denylist'],
-  'PRIVACY.md': ['iptv-org API', 'Logo 主机', '直播源站或其 CDN', '没有 TV Feed 账号系统', '远程台标默认关闭'],
-  'SECURITY.md': ['支持的版本', '私下报告安全问题', 'Report a vulnerability', '响应目标', '不接受的功能和研究行为'],
+  'LEGAL.md': ['项目定位', '与 iptv-org 的关系', '不绕过访问控制', '权利人移除流程', '项目 denylist', '家庭安全模式'],
+  'PRIVACY.md': ['iptv-org API', 'Logo 主机', '直播源站或其 CDN', '没有 TV Feed 账号系统', '远程台标默认关闭', '家庭安全模式'],
+  'SECURITY.md': ['支持的版本', '私下报告安全问题', 'Report a vulnerability', '响应目标', '不接受的功能和研究行为', '家庭安全模式'],
   'docs/PUBLIC_RELEASE.md': ['GitHub 仓库描述', '建议的 Topics', 'GitHub Release 文案模板', '单独授权动作', 'Apple Developer ID']
 }
 

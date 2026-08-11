@@ -92,7 +92,7 @@
           <footer class="pane-footer">
             <span class="safety-badge">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 7 3v5c0 4.6-2.8 8-7 10-4.2-2-7-5.4-7-10V6Z" /><path d="m9 12 2 2 4-5" /></svg>
-              按上游标记过滤
+              <span id="safety-badge-label">按上游标记过滤</span>
             </span>
             <button type="button" id="catalog-info">数据说明</button>
           </footer>
@@ -217,6 +217,14 @@
             <h3 id="privacy-controls-title">本地与网络设置</h3>
             <p>远程台标默认关闭；播放直播仍会直接连接第三方源站。</p>
           </div>
+          <label class="privacy-toggle" for="family-safety-toggle">
+            <span>
+              <strong>家庭安全模式</strong>
+              <small id="family-safety-help">启用后清除旧目录缓存和最近观看，仅显示本地批准频道，并锁定远程台标为关闭。</small>
+            </span>
+            <input id="family-safety-toggle" type="checkbox" aria-describedby="family-safety-help family-safety-note" />
+          </label>
+          <p class="family-safety-note" id="family-safety-note">这是基于本地允许列表与上游元数据的保守模式，不分析直播画面或声音，也不是儿童绝对安全保证。当前版本不提供手工 URL 导入；家庭安全模式下不会开放导入入口。</p>
           <label class="privacy-toggle" for="remote-logo-toggle">
             <span>
               <strong>显示远程台标</strong>

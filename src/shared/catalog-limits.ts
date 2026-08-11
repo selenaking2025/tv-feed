@@ -187,7 +187,7 @@ export function isValidBoundedCatalog(value: unknown): value is Catalog {
 function isValidStats(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const stats = value as Record<string, unknown>
-  return [
+  const requiredStatsAreValid = [
     'rawChannels',
     'rawStreams',
     'candidateStreams',
@@ -197,6 +197,7 @@ function isValidStats(value: unknown): boolean {
     'excludedBlockedChannel',
     'excludedBrowserIncompatible'
   ].every((key) => nonNegativeInteger(stats[key]))
+  return requiredStatsAreValid && (stats.excludedFamilySafety === undefined || nonNegativeInteger(stats.excludedFamilySafety))
 }
 
 function boundedArray(value: unknown, label: string, maxLength: number): unknown[] {

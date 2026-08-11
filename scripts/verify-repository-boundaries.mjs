@@ -123,7 +123,7 @@ export function findRendererBoundaryViolations(entries) {
   }
 
   const rendererMain = entries.get('src/renderer/src/main.ts') ?? ''
-  if (!/let\s+remoteLogosEnabled\s*=\s*readStoredBoolean\(REMOTE_LOGOS_KEY\)/.test(rendererMain)) {
+  if (!/let\s+remoteLogosEnabled\s*=\s*(?:!familySafetyEnabled\s*&&\s*)?readStoredBoolean\(REMOTE_LOGOS_KEY\)/.test(rendererMain)) {
     violations.push('src/renderer/src/main.ts: 远程台标必须从默认关闭的本地布尔偏好读取')
   }
   if (!/localStorage\.getItem\(key\)\s*===\s*['"]true['"]/.test(rendererMain)) {

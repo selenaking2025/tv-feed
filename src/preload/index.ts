@@ -3,7 +3,7 @@ import type { RemoteResourceRequest, TvFeedBridge } from '../shared/contracts.ts
 
 const bridge: TvFeedBridge = Object.freeze({
   platform: process.platform,
-  loadCatalog: (forceRefresh = false) => ipcRenderer.invoke('catalog:load', forceRefresh),
+  loadCatalog: (forceRefresh = false, familySafety = false) => ipcRenderer.invoke('catalog:load', forceRefresh, familySafety),
   clearCatalogCache: () => ipcRenderer.invoke('catalog:clear-cache'),
   fetchRemoteResource: (request: RemoteResourceRequest) => ipcRenderer.invoke('remote-resource:fetch', request),
   cancelRemoteResource: (requestId: string) => ipcRenderer.send('remote-resource:cancel', requestId),

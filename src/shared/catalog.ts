@@ -10,6 +10,7 @@ import type {
   UpstreamStream
 } from './contracts.ts'
 import { assertBoundedUpstreamBundle, CATALOG_LIMITS } from './catalog-limits.ts'
+import { FAMILY_APPROVED_CHANNEL_IDS } from './family-safety.ts'
 import { PROJECT_DENIED_CHANNEL_IDS } from './project-denylist.ts'
 import { normalizeRemoteHlsUrl, normalizeRemoteHttpsUrl } from './remote-url-policy.ts'
 
@@ -162,6 +163,31 @@ export function applyProjectDenylist(
       candidateStreams: Math.max(0, catalog.stats.candidateStreams - removedSources),
       channels: channels.length,
       excludedBlockedChannel: catalog.stats.excludedBlockedChannel + removedSources
+    }
+  }
+}
+
+export function applyFamilySafetyAllowlist(
+  catalog: Catalog,
+  approvedChannelIds: ReadonlySet<string> = FAMILY_APPROVED_CHANNEL_IDS
+): Catalog {
+  const removed = catalog.channels.filter((channel) => !approvedChannelIds.has(channel.id))
+  const channels = catalog.channels
+    .filter((channel) => approvedChannelIds.has(channel.id))
+    .map((channel) => ({ ...channel, logoUrl: '' }))
+  const removedSources = removed.reduce((total, channel) => total + channel.sources.length, 0)
+  const categoryMap = new Map(catalog.categories.map((category) => [category.id, category]))
+
+  return {
+    ...catalog,
+    channels,
+    countries: buildCountryFacets(channels),
+    categories: buildCategoryFacets(channels, categoryMap),
+    stats: {
+      ...catalog.stats,
+      candidateStreams: Math.max(0, catalog.stats.candidateStreams - removedSources),
+      channels: channels.length,
+      excludedFamilySafety: (catalog.stats.excludedFamilySafety ?? 0) + removedSources
     }
   }
 }

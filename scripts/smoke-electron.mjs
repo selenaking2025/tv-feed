@@ -11,6 +11,7 @@ const electronPath = process.env.TVFEED_ELECTRON_PATH || require('electron')
 const screenshotPath = process.env.TVFEED_SMOKE_OUTPUT || join(tmpdir(), 'tv-feed-smoke.png')
 const liveCatalog = process.env.TVFEED_SMOKE_LIVE === '1'
 const playbackRequested = process.env.TVFEED_SMOKE_PLAY === '1'
+const familySafetyRequested = process.env.TVFEED_SMOKE_FAMILY === '1'
 const forcedNetworkFailure = process.env.TVFEED_SMOKE_FORCE_NETWORK_FAILURE === '1'
 const expectedPackaged = process.env.TVFEED_EXPECT_PACKAGED === '1'
 const smokeUserDataPath = await mkdtemp(join(tmpdir(), 'tv-feed-smoke-user-data-'))
@@ -107,6 +108,15 @@ if (!checks.favoriteToggleWorks || !checks.searchFilterWorks) {
 }
 if (checks.remoteLogoChecked !== false) {
   throw new Error(`远程台标默认状态不安全：${JSON.stringify({ remoteLogoChecked: checks.remoteLogoChecked })}`)
+}
+if (!familySafetyRequested && checks.familySafetyChecked !== false) {
+  throw new Error(`家庭安全模式默认状态不正确：${JSON.stringify({ familySafetyChecked: checks.familySafetyChecked })}`)
+}
+if (familySafetyRequested && !checks.familySafetyCheck?.passed) {
+  throw new Error(`家庭安全模式验收失败：${JSON.stringify(checks.familySafetyCheck)}`)
+}
+if (familySafetyRequested && (checks.remoteLogoDisabled !== true || checks.familySafetyChecked !== true)) {
+  throw new Error(`家庭安全模式没有锁定远程台标：${JSON.stringify({ familySafetyChecked: checks.familySafetyChecked, remoteLogoDisabled: checks.remoteLogoDisabled })}`)
 }
 if (
   !playbackRequested &&

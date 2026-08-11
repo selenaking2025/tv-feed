@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { mkdir, open, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { applyProjectDenylist, transformIptvData } from '../shared/catalog.ts'
+import { applyFamilySafetyAllowlist, applyProjectDenylist, transformIptvData } from '../shared/catalog.ts'
 import {
   CATALOG_LIMITS,
   parseBoundedJsonArray,
@@ -39,13 +39,14 @@ const endpoints = {
 
 let inFlightLoad: Promise<CatalogLoadResult> | undefined
 
-export function loadCatalog(forceRefresh = false): Promise<CatalogLoadResult> {
+export async function loadCatalog(forceRefresh = false, familySafety = false): Promise<CatalogLoadResult> {
   if (!inFlightLoad) {
     inFlightLoad = loadCatalogInternal(forceRefresh).finally(() => {
       inFlightLoad = undefined
     })
   }
-  return inFlightLoad
+  const result = await inFlightLoad
+  return familySafety ? { ...result, catalog: applyFamilySafetyAllowlist(result.catalog) } : result
 }
 
 async function loadCatalogInternal(forceRefresh: boolean): Promise<CatalogLoadResult> {

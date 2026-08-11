@@ -1263,6 +1263,18 @@ svg {
   accent-color: var(--accent);
 }
 
+.privacy-toggle input:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.family-safety-note {
+  margin: -3px 2px 1px;
+  color: #a7ad85;
+  font-size: 10px;
+  line-height: 1.65;
+}
+
 .privacy-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
