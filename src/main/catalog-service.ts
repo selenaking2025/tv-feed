@@ -1,7 +1,15 @@
-import { app, net } from 'electron'
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { app } from 'electron'
+import { mkdir, open, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { applyProjectDenylist, transformIptvData } from '../shared/catalog.ts'
+import {
+  CATALOG_LIMITS,
+  parseBoundedJsonArray,
+  parseCatalogCache,
+  serializeCatalogForCache,
+  UPSTREAM_RESPONSE_LIMITS,
+  type UpstreamEndpointName
+} from '../shared/catalog-limits.ts'
 import { createOfflineSampleCatalog } from '../shared/sample-catalog.ts'
 import type {
   Catalog,
@@ -14,9 +22,10 @@ import type {
   UpstreamLogo,
   UpstreamStream
 } from '../shared/contracts.ts'
+import { fetchBoundedHttps } from './secure-network.ts'
 
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000
-const REQUEST_TIMEOUT_MS = 30_000
+const REQUEST_TIMEOUT_MS = 120_000
 const API_ROOT = 'https://iptv-org.github.io/api'
 
 const endpoints = {
@@ -79,35 +88,34 @@ async function loadCatalogInternal(forceRefresh: boolean): Promise<CatalogLoadRe
 }
 
 async function fetchUpstreamBundle(): Promise<UpstreamBundle> {
-  const [channels, streams, countries, categories, logos, blocklist] = await Promise.all([
-    fetchJsonArray<UpstreamChannel>(endpoints.channels, '频道'),
-    fetchJsonArray<UpstreamStream>(endpoints.streams, '线路'),
-    fetchJsonArray<UpstreamCountry>(endpoints.countries, '国家'),
-    fetchJsonArray<UpstreamCategory>(endpoints.categories, '分类'),
-    fetchJsonArray<UpstreamLogo>(endpoints.logos, '台标'),
-    fetchJsonArray<UpstreamBlocklistEntry>(endpoints.blocklist, '屏蔽列表')
+  // Refreshes happen at most twice a day. Two bounded responses at a time avoid
+  // the six-response peak while keeping the large public catalog usable.
+  const [channels, logos] = await Promise.all([
+    fetchJsonArray<UpstreamChannel>('channels', endpoints.channels, '频道'),
+    fetchJsonArray<UpstreamLogo>('logos', endpoints.logos, '台标')
+  ])
+  const [streams, blocklist] = await Promise.all([
+    fetchJsonArray<UpstreamStream>('streams', endpoints.streams, '线路'),
+    fetchJsonArray<UpstreamBlocklistEntry>('blocklist', endpoints.blocklist, '屏蔽列表')
+  ])
+  const [countries, categories] = await Promise.all([
+    fetchJsonArray<UpstreamCountry>('countries', endpoints.countries, '国家'),
+    fetchJsonArray<UpstreamCategory>('categories', endpoints.categories, '分类')
   ])
 
   return { channels, streams, countries, categories, logos, blocklist }
 }
 
-async function fetchJsonArray<T>(url: string, label: string): Promise<T[]> {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-  try {
-    const response = await net.fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      signal: controller.signal,
-      headers: { Accept: 'application/json' }
-    })
-    if (!response.ok) throw new Error(`${label}接口返回 HTTP ${response.status}`)
-    const value: unknown = await response.json()
-    if (!Array.isArray(value)) throw new Error(`${label}接口格式无效`)
-    return value as T[]
-  } finally {
-    clearTimeout(timeout)
-  }
+async function fetchJsonArray<T>(endpoint: UpstreamEndpointName, url: string, label: string): Promise<T[]> {
+  const limits = UPSTREAM_RESPONSE_LIMITS[endpoint]
+  const response = await fetchBoundedHttps(url, {
+    accept: 'application/json',
+    allowCompression: true,
+    maxBytes: limits.maxBytes,
+    timeoutMs: REQUEST_TIMEOUT_MS
+  })
+  if (response.contentType !== 'application/json') throw new Error(`${label}接口返回了非 JSON 内容`)
+  return parseBoundedJsonArray(response.body, label, limits.maxRecords) as T[]
 }
 
 function cachePath(): string {
@@ -125,32 +133,37 @@ export async function clearCatalogCache(): Promise<boolean> {
 }
 
 async function readCache(): Promise<Catalog | undefined> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined
   try {
-    const parsed: unknown = JSON.parse(await readFile(cachePath(), 'utf8'))
-    return isValidCatalog(parsed) ? applyProjectDenylist(parsed) : undefined
+    handle = await open(cachePath(), 'r')
+    const before = await handle.stat()
+    if (!before.isFile() || before.size <= 0 || before.size > CATALOG_LIMITS.maxCacheBytes) return undefined
+
+    const body = new Uint8Array(before.size)
+    let offset = 0
+    while (offset < body.byteLength) {
+      const { bytesRead } = await handle.read(body, offset, body.byteLength - offset, offset)
+      if (bytesRead === 0) return undefined
+      offset += bytesRead
+    }
+    const after = await handle.stat()
+    if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return undefined
+    const parsed = parseCatalogCache(body)
+    return parsed ? applyProjectDenylist(parsed) : undefined
   } catch {
     return undefined
+  } finally {
+    await handle?.close().catch(() => undefined)
   }
 }
 
 async function writeCache(catalog: Catalog): Promise<void> {
   const destination = cachePath()
   const temporary = `${destination}.tmp`
+  const serialized = serializeCatalogForCache(catalog)
   await mkdir(dirname(destination), { recursive: true })
-  await writeFile(temporary, JSON.stringify(catalog), 'utf8')
+  await writeFile(temporary, serialized, { encoding: 'utf8', mode: 0o600 })
   await rename(temporary, destination)
-}
-
-function isValidCatalog(value: unknown): value is Catalog {
-  if (!value || typeof value !== 'object') return false
-  const candidate = value as Partial<Catalog>
-  if (candidate.version !== 1 || typeof candidate.generatedAt !== 'string' || !Array.isArray(candidate.channels)) return false
-  if (!['iptv-org', 'offline-sample'].includes(candidate.source ?? '')) return false
-  return candidate.channels.every((channel) => {
-    if (!channel || typeof channel !== 'object') return false
-    const item = channel as Partial<Catalog['channels'][number]>
-    return typeof item.id === 'string' && typeof item.name === 'string' && Array.isArray(item.sources)
-  })
 }
 
 function toErrorMessage(error: unknown): string {

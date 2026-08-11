@@ -58,6 +58,9 @@ if (!payload.ok) throw new Error(`Electron 验收失败：${payload.error || '�
 const checks = payload.result
 if (checks.title !== 'TV Feed') throw new Error(`窗口标题不正确：${checks.title}`)
 if (!checks.ready || !checks.bridge || !checks.hasVideo) throw new Error(`应用初始化不完整：${JSON.stringify(checks)}`)
+if (!checks.directExternalFetchBlocked || /(?:img|media|connect)-src[^;]*https:/i.test(checks.csp || '')) {
+  throw new Error(`渲染器外部直连策略未生效：${JSON.stringify({ blocked: checks.directExternalFetchBlocked, csp: checks.csp })}`)
+}
 if (checks.rows < 8 || checks.visibleChannelNames < 8 || checks.sourceButtons < 1 || !checks.selectedChannel) {
   throw new Error(`频道界面未完整渲染：${JSON.stringify(checks)}`)
 }

@@ -1,5 +1,6 @@
 import Hls from 'hls.js'
 import type { CatalogSource } from '../../shared/contracts.ts'
+import { SecureHlsLoader } from './secure-hls-loader.ts'
 
 export type PlaybackState = 'idle' | 'loading' | 'playing' | 'paused' | 'error'
 
@@ -40,6 +41,7 @@ export class StreamPlayer {
 
     if (Hls.isSupported()) {
       this.hls = new Hls({
+        loader: SecureHlsLoader,
         enableWorker: true,
         lowLatencyMode: true,
         backBufferLength: 60,
@@ -64,14 +66,7 @@ export class StreamPlayer {
       return
     }
 
-    if (this.video.canPlayType('application/vnd.apple.mpegurl')) {
-      this.video.src = source.url
-      this.video.load()
-      if (autoplay) void this.video.play().catch(() => this.callbacks.onState('paused', '点击播放按钮继续'))
-      return
-    }
-
-    this.fail('当前系统不支持 HLS 直播')
+    this.fail('当前系统无法启用安全 HLS 加载器')
   }
 
   async toggle(): Promise<void> {

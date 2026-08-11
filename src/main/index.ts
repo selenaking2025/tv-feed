@@ -3,10 +3,12 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { clearCatalogCache, loadCatalog } from './catalog-service.ts'
+import { fetchRemoteResource, validateRemoteResourceRequest } from './remote-resource-service.ts'
 
 const APP_SCHEME = 'tvfeed'
 const APP_HOST = 'app'
-const CONTENT_SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; media-src 'self' blob: https:; connect-src 'self' blob: https:; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+const CONTENT_SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+const MAX_CONCURRENT_REMOTE_FETCHES = 8
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -23,6 +25,7 @@ protocol.registerSchemesAsPrivileged([
 
 let mainWindow: BrowserWindow | null = null
 let smokeHandled = false
+const remoteFetches = new Map<string, { controller: AbortController; senderId: number }>()
 
 if (process.env.TVFEED_SMOKE_PLAY === '1') {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
@@ -71,6 +74,8 @@ function createMainWindow(): void {
   mainWindow.webContents.on('will-navigate', (event, targetUrl) => {
     if (!isTrustedRendererUrl(targetUrl)) event.preventDefault()
   })
+  const rendererId = mainWindow.webContents.id
+  mainWindow.webContents.once('destroyed', () => abortRemoteFetches(rendererId))
   mainWindow.once('ready-to-show', () => mainWindow?.show())
   mainWindow.on('closed', () => {
     mainWindow = null
@@ -91,6 +96,7 @@ function createMainWindow(): void {
       process.stderr.write(`TVFEED_DIAGNOSTIC preload-error ${path} ${error.message}\n`)
     })
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
+      abortRemoteFetches(rendererId)
       process.stderr.write(`TVFEED_DIAGNOSTIC renderer-gone ${details.reason} ${details.exitCode}\n`)
     })
     mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
@@ -120,6 +126,29 @@ function registerIpc(): void {
     assertTrustedSender(event.senderFrame?.url ?? '')
     return clearCatalogCache()
   })
+  ipcMain.handle('remote-resource:fetch', async (event, input: unknown) => {
+    assertTrustedSender(event.senderFrame?.url ?? '')
+    const request = validateRemoteResourceRequest(input)
+    const senderId = event.sender.id
+    if (countRemoteFetches(senderId) >= MAX_CONCURRENT_REMOTE_FETCHES) {
+      throw new Error(`同时进行的远程资源请求不能超过 ${MAX_CONCURRENT_REMOTE_FETCHES} 个`)
+    }
+    const key = remoteFetchKey(senderId, request.requestId)
+    if (remoteFetches.has(key)) throw new Error('远程资源请求 ID 已在使用')
+
+    const controller = new AbortController()
+    remoteFetches.set(key, { controller, senderId })
+    try {
+      return await fetchRemoteResource(request, controller.signal)
+    } finally {
+      remoteFetches.delete(key)
+    }
+  })
+  ipcMain.on('remote-resource:cancel', (event, requestId: unknown) => {
+    assertTrustedSender(event.senderFrame?.url ?? '')
+    if (typeof requestId !== 'string' || !/^[A-Za-z0-9:_-]{1,128}$/.test(requestId)) return
+    remoteFetches.get(remoteFetchKey(event.sender.id, requestId))?.controller.abort(new Error('远程资源请求已取消'))
+  })
   ipcMain.handle('app:version', (event) => {
     assertTrustedSender(event.senderFrame?.url ?? '')
     return app.getVersion()
@@ -137,6 +166,42 @@ function hardenSession(): void {
   const currentSession = session.defaultSession
   currentSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
   currentSession.setPermissionCheckHandler(() => false)
+  currentSession.webRequest.onBeforeRequest(
+    { urls: ['http://*/*', 'https://*/*'] },
+    (details, callback) => callback(isAllowedDevelopmentRequest(details.url) ? {} : { cancel: true })
+  )
+}
+
+function isAllowedDevelopmentRequest(url: string): boolean {
+  const developmentUrl = process.env.ELECTRON_RENDERER_URL
+  if (!developmentUrl) return false
+  try {
+    return new URL(url).origin === new URL(developmentUrl).origin
+  } catch {
+    return false
+  }
+}
+
+function countRemoteFetches(senderId: number): number {
+  let count = 0
+  for (const request of remoteFetches.values()) {
+    if (request.senderId === senderId) count += 1
+  }
+  return count
+}
+
+function remoteFetchKey(senderId: number, requestId: string): string {
+  return `${senderId}:${requestId}`
+}
+
+function abortRemoteFetches(senderId: number | undefined): void {
+  if (senderId === undefined) return
+  for (const [key, request] of remoteFetches) {
+    if (request.senderId === senderId) {
+      request.controller.abort(new Error('渲染进程已结束'))
+      remoteFetches.delete(key)
+    }
+  }
 }
 
 async function registerAppProtocol(): Promise<void> {
@@ -204,6 +269,9 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
 
   try {
     const playbackCheck = await runPlaybackCheck(webContents)
+    const directExternalFetchBlocked: unknown = await webContents.executeJavaScript(
+      `fetch('https://127.0.0.1/tv-feed-security-smoke').then(() => false, () => true)`
+    )
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 350))
     const image = await webContents.capturePage()
     const domResult: unknown = await webContents.executeJavaScript(`(() => {
@@ -263,12 +331,14 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         searchFilterWorks,
         gridColumns: layout ? getComputedStyle(layout).gridTemplateColumns : '',
         searchLabel: search?.getAttribute('aria-label') ?? '',
-        bridge: typeof window.tvFeed?.loadCatalog === 'function'
+        bridge: typeof window.tvFeed?.loadCatalog === 'function',
+        csp: document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute('content') ?? ''
       }
     })()`)
     const result = {
       ...(domResult && typeof domResult === 'object' ? domResult : {}),
-      playbackCheck
+      playbackCheck,
+      directExternalFetchBlocked: directExternalFetchBlocked === true
     }
     await writeFile(outputPath, image.toPNG())
     const payload = { ok: true, screenshot: outputPath, result }

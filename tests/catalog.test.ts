@@ -86,8 +86,44 @@ test('线路规范化拒绝私网、凭据、特殊请求头和非 HLS 地址', 
   assert.equal(normalizeBrowserHlsUrl({ channel: 'x', url: 'https://cdn.example.com/live.m3u8#x' }), 'https://cdn.example.com/live.m3u8')
   assert.equal(normalizeBrowserHlsUrl({ channel: 'x', url: 'https://user:pass@cdn.example.com/live.m3u8' }), '')
   assert.equal(normalizeBrowserHlsUrl({ channel: 'x', url: 'https://192.168.1.2/live.m3u8' }), '')
+  assert.equal(normalizeBrowserHlsUrl({ channel: 'x', url: 'https://[::ffff:127.0.0.1]/live.m3u8' }), '')
+  assert.equal(normalizeBrowserHlsUrl({ channel: 'x', url: 'https://[fe90::1]/live.m3u8' }), '')
   assert.equal(normalizeBrowserHlsUrl({ channel: 'x', url: 'https://cdn.example.com/live.m3u8', user_agent: 'custom' }), '')
   assert.equal(normalizeBrowserHlsUrl({ channel: 'x', url: 'https://cdn.example.com/video.mp4' }), '')
+})
+
+test('私网字面地址不能作为远程台标进入目录', () => {
+  const bundle: UpstreamBundle = {
+    channels: [channel('safe.cn')],
+    streams: [{ channel: 'safe.cn', url: 'https://media.example.com/live.m3u8' }],
+    countries: [{ code: 'CN', name: '中国', flag: '🇨🇳' }],
+    categories: [{ id: 'general', name: '综合' }],
+    logos: [{ channel: 'safe.cn', in_use: true, url: 'https://127.0.0.1/logo.png' }],
+    blocklist: []
+  }
+
+  assert.equal(transformIptvData(bundle).channels[0]?.logoUrl, '')
+})
+
+test('每个频道在摄取阶段只保留有界 Top-K 线路', () => {
+  const streams = Array.from({ length: 4_000 }, (_, index) => ({
+    channel: 'safe.cn',
+    url: `https://media.example.com/live/${index}.m3u8`,
+    quality: index === 3_999 ? '1080p' : '360p'
+  }))
+  const bundle: UpstreamBundle = {
+    channels: [channel('safe.cn')],
+    streams,
+    countries: [{ code: 'CN', name: '中国', flag: '🇨🇳' }],
+    categories: [{ id: 'general', name: '综合' }],
+    logos: [],
+    blocklist: []
+  }
+
+  const catalog = transformIptvData(bundle)
+  assert.equal(catalog.channels[0]?.sources.length, 12)
+  assert.equal(catalog.stats.candidateStreams, 12)
+  assert.ok(catalog.channels[0]?.sources.some((source) => source.quality === '1080p'))
 })
 
 test('离线样例仍遵循保守过滤后的目录结构且每个频道都有线路', () => {

@@ -12,6 +12,8 @@ const RECENTS_KEY = 'tvfeed:recents:v1'
 const LAST_CHANNEL_KEY = 'tvfeed:last-channel:v1'
 const REMOTE_LOGOS_KEY = 'tvfeed:remote-logos:v1'
 const CHINESE_REGIONS = new Set(['CN', 'HK', 'TW', 'MO'])
+const MAX_CONCURRENT_LOGO_REQUESTS = 4
+const MAX_PENDING_LOGO_REQUESTS = 64
 
 const elements = {
   app: required<HTMLElement>('#app-shell'),
@@ -71,6 +73,9 @@ let recents = readStoredArray(RECENTS_KEY)
 let failedSources = new Set<string>()
 let refreshInProgress = false
 let remoteLogosEnabled = readStoredBoolean(REMOTE_LOGOS_KEY)
+let logoRequestSequence = 0
+let activeLogoRequests = 0
+const logoQueue: Array<() => Promise<void>> = []
 
 const player = new StreamPlayer(elements.video, {
   onState: updatePlaybackState,
@@ -366,18 +371,60 @@ function createLogo(channel: CatalogChannel, className: string): HTMLElement {
   wrapper.append(fallback)
   if (remoteLogosEnabled && channel.logoUrl) {
     const image = document.createElement('img')
-    image.src = channel.logoUrl
     image.alt = ''
     image.loading = 'lazy'
     image.referrerPolicy = 'no-referrer'
-    image.addEventListener('error', () => image.remove(), { once: true })
+    image.hidden = true
     wrapper.append(image)
+    enqueueLogoLoad(wrapper, image, channel.logoUrl)
   }
   return wrapper
 }
 
+function enqueueLogoLoad(wrapper: HTMLElement, image: HTMLImageElement, url: string): void {
+  if (logoQueue.length >= MAX_PENDING_LOGO_REQUESTS) {
+    image.remove()
+    return
+  }
+  logoQueue.push(async () => {
+    if (!remoteLogosEnabled || !wrapper.isConnected) return
+    const requestId = `logo-${Date.now().toString(36)}-${(logoRequestSequence += 1).toString(36)}`
+    try {
+      const response = await window.tvFeed.fetchRemoteResource({ requestId, url, kind: 'logo' })
+      if (!remoteLogosEnabled || !wrapper.isConnected) return
+      const objectUrl = URL.createObjectURL(new Blob([Uint8Array.from(response.body).buffer], { type: response.contentType }))
+      const releaseObjectUrl = (): void => URL.revokeObjectURL(objectUrl)
+      image.addEventListener('load', () => {
+        image.hidden = false
+        releaseObjectUrl()
+      }, { once: true })
+      image.addEventListener('error', () => {
+        releaseObjectUrl()
+        image.remove()
+      }, { once: true })
+      image.src = objectUrl
+    } catch {
+      image.remove()
+    }
+  })
+  pumpLogoQueue()
+}
+
+function pumpLogoQueue(): void {
+  while (activeLogoRequests < MAX_CONCURRENT_LOGO_REQUESTS) {
+    const task = logoQueue.shift()
+    if (!task) return
+    activeLogoRequests += 1
+    void task().finally(() => {
+      activeLogoRequests -= 1
+      pumpLogoQueue()
+    })
+  }
+}
+
 function updateRemoteLogoPreference(): void {
   remoteLogosEnabled = elements.remoteLogoToggle.checked
+  if (!remoteLogosEnabled) logoQueue.length = 0
   writeStoredBoolean(REMOTE_LOGOS_KEY, remoteLogosEnabled)
   renderVirtualRows()
   const channel = getChannel(selectedChannelId)

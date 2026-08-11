@@ -122,10 +122,29 @@ export interface CatalogLoadResult {
   warning: string
 }
 
+export type RemoteResourceKind = 'hls-playlist' | 'hls-json' | 'hls-binary' | 'logo'
+
+export interface RemoteResourceRequest {
+  requestId: string
+  url: string
+  kind: RemoteResourceKind
+  rangeStart?: number
+  rangeEnd?: number
+}
+
+export interface RemoteResourceResponse {
+  body: Uint8Array
+  contentType: string
+  finalUrl: string
+  statusCode: number
+}
+
 export interface TvFeedBridge {
   platform: NodeJS.Platform
   loadCatalog(forceRefresh?: boolean): Promise<CatalogLoadResult>
   clearCatalogCache(): Promise<boolean>
+  fetchRemoteResource(request: RemoteResourceRequest): Promise<RemoteResourceResponse>
+  cancelRemoteResource(requestId: string): void
   getAppVersion(): Promise<string>
   signalRendererReady(): void
 }

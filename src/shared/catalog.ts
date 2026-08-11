@@ -9,9 +9,10 @@ import type {
   UpstreamLogo,
   UpstreamStream
 } from './contracts.ts'
+import { assertBoundedUpstreamBundle, CATALOG_LIMITS } from './catalog-limits.ts'
 import { PROJECT_DENIED_CHANNEL_IDS } from './project-denylist.ts'
+import { normalizeRemoteHlsUrl, normalizeRemoteHttpsUrl } from './remote-url-policy.ts'
 
-const MAX_SOURCES_PER_CHANNEL = 12
 const FORBIDDEN_CATEGORY_IDS = new Set(['xxx'])
 
 export function transformIptvData(
@@ -19,6 +20,8 @@ export function transformIptvData(
   generatedAt = new Date().toISOString(),
   projectDeniedChannelIds: ReadonlySet<string> = PROJECT_DENIED_CHANNEL_IDS
 ): Catalog {
+  assertBoundedUpstreamBundle(bundle)
+  if (generatedAt.length > 64 || !Number.isFinite(Date.parse(generatedAt))) throw new Error('目录生成时间无效')
   const countryMap = new Map(bundle.countries.map((country) => [country.code, country]))
   const categoryMap = new Map(bundle.categories.map((category) => [category.id, category]))
   const blockedChannels = new Set([
@@ -27,13 +30,12 @@ export function transformIptvData(
   ])
   const channelMap = new Map(bundle.channels.map((channel) => [channel.id, channel]))
   const logoMap = buildLogoMap(bundle.logos)
-  const groupedSources = new Map<string, CatalogSource[]>()
+  const groupedSources = new Map<string, Map<string, CatalogSource>>()
 
   let excludedUnknownChannel = 0
   let excludedUnsafeChannel = 0
   let excludedBlockedChannel = 0
   let excludedBrowserIncompatible = 0
-  let candidateStreams = 0
 
   for (const stream of bundle.streams) {
     const channel = stream.channel ? channelMap.get(stream.channel) : undefined
@@ -58,33 +60,41 @@ export function transformIptvData(
       continue
     }
 
-    const sources = groupedSources.get(channel.id) ?? []
-    if (!sources.some((source) => source.url === normalizedUrl)) {
-      sources.push(toCatalogSource(channel.id, stream, normalizedUrl))
-      groupedSources.set(channel.id, sources)
-      candidateStreams += 1
-    }
+    const sources = groupedSources.get(channel.id) ?? new Map<string, CatalogSource>()
+    insertBoundedSource(sources, toCatalogSource(channel.id, stream, normalizedUrl))
+    if (sources.size > 0) groupedSources.set(channel.id, sources)
   }
 
   const channels: CatalogChannel[] = []
-  for (const [channelId, sources] of groupedSources) {
+  const encoder = new TextEncoder()
+  const channelByteBudget = CATALOG_LIMITS.maxCatalogBytes - CATALOG_LIMITS.catalogStructuralReserveBytes
+  let retainedChannelBytes = 0
+  for (const [channelId, sourceMap] of groupedSources) {
     const channel = channelMap.get(channelId)
     if (!channel) continue
+    if (channels.length >= CATALOG_LIMITS.maxCatalogChannels) {
+      throw new Error(`筛选后频道数超过安全上限 ${CATALOG_LIMITS.maxCatalogChannels}`)
+    }
 
     const country = countryMap.get(channel.country)
     const categoryIds = (channel.categories ?? []).filter((id) => categoryMap.has(id) && !FORBIDDEN_CATEGORY_IDS.has(id))
     const categoryNames = categoryIds.map((id) => categoryMap.get(id)?.name ?? id)
-    const sortedSources = sources
-      .sort(compareSources)
-      .slice(0, MAX_SOURCES_PER_CHANNEL)
+    const sortedSources = [...sourceMap.values()].sort(compareSources)
 
     const name = cleanText(channel.name) || channel.id
     const altNames = (channel.alt_names ?? []).map(cleanText).filter(Boolean)
     const network = cleanText(channel.network ?? '')
     const countryName = cleanText(country?.name ?? channel.country) || '未知地区'
     const flag = cleanText(country?.flag ?? '')
+    const searchText = [name, ...altNames, channel.id, network, countryName, channel.country, ...categoryIds, ...categoryNames]
+      .filter(Boolean)
+      .join(' ')
+      .toLocaleLowerCase()
+    if (searchText.length > CATALOG_LIMITS.maxSearchTextLength) {
+      throw new Error(`频道 ${channel.id} 的搜索元数据超过安全上限`)
+    }
 
-    channels.push({
+    const catalogChannel: CatalogChannel = {
       id: channel.id,
       name,
       altNames,
@@ -95,16 +105,19 @@ export function transformIptvData(
       categoryIds,
       categoryNames,
       logoUrl: logoMap.get(channel.id) ?? '',
-      website: normalizeHttpsUrl(channel.website ?? ''),
-      searchText: [name, ...altNames, channel.id, network, countryName, channel.country, ...categoryIds, ...categoryNames]
-        .filter(Boolean)
-        .join(' ')
-        .toLocaleLowerCase(),
+      website: normalizeRemoteHttpsUrl(channel.website ?? ''),
+      searchText,
       sources: sortedSources
-    })
+    }
+    retainedChannelBytes += encoder.encode(JSON.stringify(catalogChannel)).byteLength
+    if (retainedChannelBytes > channelByteBudget) {
+      throw new Error(`筛选后频道目录超过 ${channelByteBudget} 字节摄取预算`)
+    }
+    channels.push(catalogChannel)
   }
 
   channels.sort(compareChannels)
+  const candidateStreams = channels.reduce((total, channel) => total + channel.sources.length, 0)
 
   return {
     version: 1,
@@ -161,47 +174,14 @@ export function isExplicitlySafeChannel(channel: UpstreamChannel): boolean {
 
 export function normalizeBrowserHlsUrl(stream: UpstreamStream): string {
   if (stream.referrer || stream.user_agent) return ''
-
-  const rawUrl = cleanText(stream.url)
-  if (!rawUrl || rawUrl.length > 4096) return ''
-
-  try {
-    const parsed = new URL(rawUrl)
-    if (parsed.protocol !== 'https:') return ''
-    if (parsed.username || parsed.password) return ''
-    if (!parsed.href.toLocaleLowerCase().includes('.m3u8')) return ''
-    if (!isPublicHostname(parsed.hostname)) return ''
-    parsed.hash = ''
-    return parsed.toString()
-  } catch {
-    return ''
-  }
-}
-
-function isPublicHostname(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, '').toLocaleLowerCase()
-  if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return false
-  if (host === '::' || host === '::1' || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:')) return false
-
-  const octets = host.split('.').map((part) => Number(part))
-  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return true
-
-  const first = octets[0] ?? -1
-  const second = octets[1] ?? -1
-  if (first === 0 || first === 10 || first === 127 || first >= 224) return false
-  if (first === 100 && second >= 64 && second <= 127) return false
-  if (first === 169 && second === 254) return false
-  if (first === 172 && second >= 16 && second <= 31) return false
-  if (first === 192 && second === 168) return false
-  if (first === 198 && (second === 18 || second === 19)) return false
-  return true
+  return normalizeRemoteHlsUrl(stream.url)
 }
 
 function buildLogoMap(logos: UpstreamLogo[]): Map<string, string> {
   const candidates = new Map<string, { score: number; url: string }>()
   for (const logo of logos) {
     if (!logo.channel || !logo.in_use || !logo.url) continue
-    const url = normalizeHttpsUrl(logo.url)
+    const url = normalizeRemoteHttpsUrl(logo.url)
     if (!url) continue
     const tags = logo.tags ?? []
     const score = Number(tags.includes('horizontal')) * 2 + Number(tags.includes('white'))
@@ -230,6 +210,23 @@ function compareSources(a: CatalogSource, b: CatalogSource): number {
   const availabilityDifference = Number(Boolean(a.label)) - Number(Boolean(b.label))
   if (availabilityDifference) return availabilityDifference
   return qualityScore(b.quality) - qualityScore(a.quality) || a.title.localeCompare(b.title)
+}
+
+function insertBoundedSource(sources: Map<string, CatalogSource>, candidate: CatalogSource): void {
+  if (sources.has(candidate.url)) return
+  if (sources.size < CATALOG_LIMITS.maxSourcesPerChannel) {
+    sources.set(candidate.url, candidate)
+    return
+  }
+
+  let worst: CatalogSource | undefined
+  for (const source of sources.values()) {
+    if (!worst || compareSources(source, worst) > 0) worst = source
+  }
+  if (worst && compareSources(candidate, worst) < 0) {
+    sources.delete(worst.url)
+    sources.set(candidate.url, candidate)
+  }
 }
 
 function compareChannels(a: CatalogChannel, b: CatalogChannel): number {
@@ -287,15 +284,6 @@ function buildCategoryFacets(channels: CatalogChannel[], categoryMap: Map<string
   return [...counts]
     .map(([id, count]) => ({ id, name: categoryMap.get(id)?.name ?? id, count }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, ['zh-CN', 'en']))
-}
-
-function normalizeHttpsUrl(value: string): string {
-  try {
-    const url = new URL(cleanText(value))
-    return url.protocol === 'https:' ? url.toString() : ''
-  } catch {
-    return ''
-  }
 }
 
 function cleanText(value: unknown): string {
