@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { applyProjectDenylist, isExplicitlySafeChannel, normalizeBrowserHlsUrl, transformIptvData } from '../src/shared/catalog.ts'
 import { displayCountryName, getCountrySearchAliases, sortCountriesForDisplay } from '../src/shared/countries.ts'
-import { createOfflineSampleCatalog } from '../src/shared/sample-catalog.ts'
+import { createHlsAcceptanceCatalog, createOfflineSampleCatalog } from '../src/shared/sample-catalog.ts'
 import type { UpstreamBundle, UpstreamChannel } from '../src/shared/contracts.ts'
 
 function channel(id: string, overrides: Partial<UpstreamChannel> = {}): UpstreamChannel {
@@ -132,6 +132,15 @@ test('离线样例仍遵循保守过滤后的目录结构且每个频道都有�
   assert.ok(catalog.channels.length >= 8)
   assert.ok(catalog.channels.every((item) => item.sources.length > 0))
   assert.ok(catalog.channels.every((item) => item.sources.every((source) => source.url.startsWith('https://'))))
+})
+
+test('HLS smoke 验收目录只接受公网 HTTPS 清单且不读取真实频道目录', () => {
+  const catalog = createHlsAcceptanceCatalog('https://media.example.com/acceptance.m3u8', '2026-08-10T00:00:00.000Z')
+  assert.equal(catalog.source, 'offline-sample')
+  assert.ok(catalog.channels.length >= 8)
+  assert.ok(catalog.channels.every((item) => item.sources.every((source) => source.url === 'https://media.example.com/acceptance.m3u8')))
+  assert.throws(() => createHlsAcceptanceCatalog('https://127.0.0.1/private.m3u8'), /公网 HTTPS/)
+  assert.throws(() => createHlsAcceptanceCatalog('http://media.example.com/live.m3u8'), /公网 HTTPS/)
 })
 
 test('项目 denylist 会从旧目录缓存中移除频道并重建统计与筛选项', () => {

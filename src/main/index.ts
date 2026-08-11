@@ -10,6 +10,10 @@ const APP_HOST = 'app'
 const CONTENT_SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 const MAX_CONCURRENT_REMOTE_FETCHES = 8
 
+if (process.env.TVFEED_SMOKE_OUTPUT && process.env.TVFEED_SMOKE_USER_DATA) {
+  app.setPath('userData', process.env.TVFEED_SMOKE_USER_DATA)
+}
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: APP_SCHEME,
@@ -87,20 +91,20 @@ function createMainWindow(): void {
         if (smokeHandled || !mainWindow) return
         smokeHandled = true
         void runSmokeInspection(mainWindow.webContents)
-      }, process.env.TVFEED_SMOKE_LIVE === '1' ? 90_000 : 2_500)
+      }, process.env.TVFEED_SMOKE_LIVE === '1' && process.env.TVFEED_SMOKE_FORCE_NETWORK_FAILURE !== '1' ? 90_000 : 2_500)
     })
     mainWindow.webContents.on('did-fail-load', (_event, code, description, validatedUrl) => {
-      process.stderr.write(`TVFEED_DIAGNOSTIC load-failed ${code} ${description} ${validatedUrl}\n`)
+      process.stderr.write(`TVFEED_DIAGNOSTIC load-failed ${code} ${sanitizeDiagnostic(description)} ${sanitizeDiagnostic(validatedUrl)}\n`)
     })
     mainWindow.webContents.on('preload-error', (_event, path, error) => {
-      process.stderr.write(`TVFEED_DIAGNOSTIC preload-error ${path} ${error.message}\n`)
+      process.stderr.write(`TVFEED_DIAGNOSTIC preload-error ${sanitizeDiagnostic(path)} ${sanitizeDiagnostic(error.message)}\n`)
     })
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
       abortRemoteFetches(rendererId)
       process.stderr.write(`TVFEED_DIAGNOSTIC renderer-gone ${details.reason} ${details.exitCode}\n`)
     })
     mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
-      if (level >= 2) process.stderr.write(`TVFEED_DIAGNOSTIC console ${message} ${sourceId}:${line}\n`)
+      if (level >= 2) process.stderr.write(`TVFEED_DIAGNOSTIC console ${sanitizeDiagnostic(message)} ${sanitizeDiagnostic(sourceId)}:${line}\n`)
     })
   }
 
@@ -114,7 +118,11 @@ function createMainWindow(): void {
 
 function reportLoadError(error: unknown): void {
   if (!process.env.TVFEED_SMOKE_OUTPUT) return
-  process.stderr.write(`TVFEED_DIAGNOSTIC load-rejected ${error instanceof Error ? error.message : String(error)}\n`)
+  process.stderr.write(`TVFEED_DIAGNOSTIC load-rejected ${sanitizeDiagnostic(error instanceof Error ? error.message : String(error))}\n`)
+}
+
+function sanitizeDiagnostic(value: string): string {
+  return value.replace(/https:\/\/[^\s)]+/gi, '[remote URL]')
 }
 
 function registerIpc(): void {
@@ -289,6 +297,12 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         : []
       const sourceButtons = document.querySelectorAll('[data-source-button]')
       const favorite = document.querySelector('#favorite-channel')
+      const storageBeforeInteraction = {
+        favorites: localStorage.getItem('tvfeed:favorites:v1'),
+        recents: localStorage.getItem('tvfeed:recents:v1'),
+        remoteLogos: localStorage.getItem('tvfeed:remote-logos:v1')
+      }
+      const remoteLogoToggle = document.querySelector('#remote-logo-toggle')
       const favoriteBefore = favorite?.getAttribute('aria-pressed')
       favorite?.click()
       const favoriteToggleWorks = Boolean(favoriteBefore && favorite?.getAttribute('aria-pressed') !== favoriteBefore)
@@ -324,6 +338,9 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
         hasVideo: video instanceof HTMLVideoElement,
         selectedChannel: selected?.getAttribute('data-channel-id') ?? document.querySelector('#channel-title')?.textContent ?? '',
         sourceButtons: sourceButtons.length,
+        storageBeforeInteraction,
+        remoteLogoChecked: remoteLogoToggle instanceof HTMLInputElement ? remoteLogoToggle.checked : null,
+        noAutoplay: video instanceof HTMLVideoElement ? video.paused && !video.currentSrc : false,
         countryOptions,
         chinaSearchResult,
         chinaSearchWorks,
@@ -338,7 +355,11 @@ async function runSmokeInspection(webContents: Electron.WebContents): Promise<vo
     const result = {
       ...(domResult && typeof domResult === 'object' ? domResult : {}),
       playbackCheck,
-      directExternalFetchBlocked: directExternalFetchBlocked === true
+      directExternalFetchBlocked: directExternalFetchBlocked === true,
+      packaged: app.isPackaged,
+      appName: app.getName(),
+      appVersion: app.getVersion(),
+      executableName: process.execPath.split(/[\\/]/).at(-1) ?? ''
     }
     await writeFile(outputPath, image.toPNG())
     const payload = { ok: true, screenshot: outputPath, result }

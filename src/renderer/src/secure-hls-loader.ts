@@ -43,13 +43,18 @@ export class SecureHlsLoader implements Loader<LoaderContext> {
       callbacks.onTimeout(this.stats, context, null)
     }, timeoutMs)
 
+    let range: ReturnType<typeof resourceRange>
+    try {
+      range = resourceRange(context)
+    } catch (error) {
+      this.fail(error)
+      return
+    }
     void window.tvFeed.fetchRemoteResource({
       requestId: this.requestId,
       url: context.url,
       kind: resourceKind(context),
-      ...(context.rangeStart !== undefined && context.rangeEnd !== undefined
-        ? { rangeStart: context.rangeStart, rangeEnd: context.rangeEnd }
-        : {})
+      ...range
     }).then((response) => this.succeed(response), (error: unknown) => this.fail(error))
   }
 
@@ -137,6 +142,24 @@ export function resourceKind(context: Pick<LoaderContext, 'responseType'>): Remo
   if (context.responseType === 'arraybuffer') return 'hls-binary'
   if (context.responseType === 'json') return 'hls-json'
   return 'hls-playlist'
+}
+
+export function resourceRange(
+  context: Pick<LoaderContext, 'rangeStart' | 'rangeEnd'>
+): Readonly<{ rangeStart: number; rangeEnd: number }> | Record<string, never> {
+  // hls.js initializes full-resource fragment requests with 0/0. Its built-in
+  // loaders only send a Range header when rangeEnd is truthy, so mirror that
+  // convention before crossing the stricter IPC boundary.
+  if (!context.rangeEnd) return {}
+  if (
+    !Number.isSafeInteger(context.rangeStart) ||
+    !Number.isSafeInteger(context.rangeEnd) ||
+    Number(context.rangeStart) < 0 ||
+    Number(context.rangeEnd) <= Number(context.rangeStart)
+  ) {
+    throw new Error('HLS 字节范围无效')
+  }
+  return { rangeStart: Number(context.rangeStart), rangeEnd: Number(context.rangeEnd) }
 }
 
 function decodeResponseBody(context: LoaderContext, body: Uint8Array): string | ArrayBuffer | object {

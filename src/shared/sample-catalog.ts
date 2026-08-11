@@ -1,4 +1,5 @@
 import type { Catalog, CatalogChannel } from './contracts.ts'
+import { normalizeRemoteHlsUrl } from './remote-url-policy.ts'
 
 const sampleChannels: CatalogChannel[] = [
   sampleChannel('TVFeedGeneral.demo', 'TV Feed 综合样例', 'CN', 'China', '🇨🇳', ['general'], ['综合'], 2),
@@ -42,6 +43,24 @@ export function createOfflineSampleCatalog(now = new Date().toISOString()): Cata
       excludedBlockedChannel: 0,
       excludedBrowserIncompatible: 0
     }
+  }
+}
+
+export function createHlsAcceptanceCatalog(inputUrl: string, now = new Date().toISOString()): Catalog {
+  const url = normalizeRemoteHlsUrl(inputUrl)
+  if (!url) throw new Error('HLS 验收地址必须是受支持的公网 HTTPS 清单')
+  const catalog = createOfflineSampleCatalog(now)
+  const channels = catalog.channels.map((channel) => ({
+    ...channel,
+    sources: channel.sources.map((source) => ({
+      ...source,
+      url,
+      title: '运行时 HLS 验收线路'
+    }))
+  }))
+  return {
+    ...catalog,
+    channels
   }
 }
 

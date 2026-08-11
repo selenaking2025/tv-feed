@@ -17,6 +17,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
     "verify:repository": "node scripts/verify-repository-boundaries.mjs",
+    "verify:hls:acceptance": "node scripts/verify-hls-acceptance.mjs",
+    "verify:hls:playback": "npm run build && node scripts/verify-hls-playback.mjs",
     "build": "npm run typecheck && npm run test && electron-vite build",
     "preview": "electron-vite preview",
     "smoke": "node scripts/smoke-electron.mjs",
@@ -71,7 +73,8 @@
       "category": "public.app-category.entertainment",
       "darkModeSupport": true,
       "icon": "build/icon.icns",
-      "identity": null,
+      "identity": "-",
+      "hardenedRuntime": false,
       "target": [
         "dir"
       ]

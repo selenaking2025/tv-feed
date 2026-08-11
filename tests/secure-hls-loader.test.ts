@@ -6,7 +6,7 @@ import type {
   LoaderContext,
   LoaderResponse
 } from 'hls.js'
-import { resourceKind, SecureHlsLoader } from '../src/renderer/src/secure-hls-loader.ts'
+import { resourceKind, resourceRange, SecureHlsLoader } from '../src/renderer/src/secure-hls-loader.ts'
 import type { RemoteResourceRequest, RemoteResourceResponse } from '../src/shared/contracts.ts'
 
 const LOADER_CONFIGURATION: LoaderConfiguration = {
@@ -27,6 +27,14 @@ test('HLS 上下文把播放列表、JSON、分片和密钥映射到受控资源
   assert.equal(resourceKind({ responseType: 'text' }), 'hls-playlist')
   assert.equal(resourceKind({ responseType: 'json' }), 'hls-json')
   assert.equal(resourceKind({ responseType: 'arraybuffer' }), 'hls-binary')
+})
+
+test('hls.js 的 0/0 表示完整资源，只有正向有效区间才进入 IPC Range', () => {
+  assert.deepEqual(resourceRange({ rangeStart: 0, rangeEnd: 0 }), {})
+  assert.deepEqual(resourceRange({}), {})
+  assert.deepEqual(resourceRange({ rangeStart: 100, rangeEnd: 200 }), { rangeStart: 100, rangeEnd: 200 })
+  assert.throws(() => resourceRange({ rangeStart: 200, rangeEnd: 100 }), /字节范围无效/)
+  assert.throws(() => resourceRange({ rangeEnd: 100 }), /字节范围无效/)
 })
 
 test('安全 HLS Loader 不直接联网，所有上下文都经 preload 桥请求主进程', async () => {
@@ -62,6 +70,46 @@ test('安全 HLS Loader 不直接联网，所有上下文都经 preload 桥请�
     assert.ok(binary.data instanceof ArrayBuffer)
     assert.deepEqual(requests.map((request) => request.kind), ['hls-playlist', 'hls-json', 'hls-binary'])
     assert.deepEqual(requests[2] && { start: requests[2].rangeStart, end: requests[2].rangeEnd }, { start: 100, end: 200 })
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else Reflect.deleteProperty(globalThis, 'window')
+  }
+})
+
+test('切台或销毁 Loader 会取消尚未完成的主进程请求并忽略迟到响应', async () => {
+  const cancelled: string[] = []
+  let resolveRemote: ((response: RemoteResourceResponse) => void) | undefined
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      setTimeout,
+      clearTimeout,
+      tvFeed: {
+        fetchRemoteResource: () => new Promise<RemoteResourceResponse>((resolve) => {
+          resolveRemote = resolve
+        }),
+        cancelRemoteResource: (requestId: string) => cancelled.push(requestId)
+      }
+    }
+  })
+
+  try {
+    const loader = new SecureHlsLoader({} as HlsConfig)
+    let succeeded = false
+    let aborted = false
+    loader.load({ url: 'https://media.example.com/live.m3u8', responseType: '' }, LOADER_CONFIGURATION, {
+      onSuccess: () => { succeeded = true },
+      onError: (error) => assert.fail(error.text),
+      onTimeout: () => assert.fail('unexpected timeout'),
+      onAbort: () => { aborted = true }
+    })
+    loader.abort()
+    assert.equal(cancelled.length, 1)
+    assert.equal(aborted, true)
+    resolveRemote?.(responseFor({ requestId: 'late', url: 'https://media.example.com/live.m3u8', kind: 'hls-playlist' }))
+    await Promise.resolve()
+    assert.equal(succeeded, false)
   } finally {
     if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
     else Reflect.deleteProperty(globalThis, 'window')

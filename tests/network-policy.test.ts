@@ -72,6 +72,23 @@ test('每次重定向都重新解析并拒绝私网目标', async () => {
   assert.deepEqual(requestedHosts, ['public.example.com'])
 })
 
+test('301、302、303、307 和 308 的每一跳都重新进入安全目标解析', async () => {
+  for (const statusCode of [301, 302, 303, 307, 308]) {
+    const requestedHosts: string[] = []
+    const result = await fetchBoundedHttps('https://first.example.com/start', FETCH_OPTIONS, {
+      resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+      request: async (target) => {
+        requestedHosts.push(target.hostname)
+        return target.hostname === 'first.example.com'
+          ? response(statusCode, { location: 'https://second.example.com/final' }, [])
+          : response(200, { 'content-type': 'text/plain' }, [bytes('ok')])
+      }
+    })
+    assert.equal(new TextDecoder().decode(result.body), 'ok')
+    assert.deepEqual(requestedHosts, ['first.example.com', 'second.example.com'])
+  }
+})
+
 test('固定 lookup 只把已验证地址交给实际连接，不进行第二次 DNS 查询', async () => {
   const lookup = createPinnedLookup('media.example.com', [
     { address: '93.184.216.34', family: 4 },

@@ -10,7 +10,7 @@ import {
   UPSTREAM_RESPONSE_LIMITS,
   type UpstreamEndpointName
 } from '../shared/catalog-limits.ts'
-import { createOfflineSampleCatalog } from '../shared/sample-catalog.ts'
+import { createHlsAcceptanceCatalog, createOfflineSampleCatalog } from '../shared/sample-catalog.ts'
 import type {
   Catalog,
   CatalogLoadResult,
@@ -49,6 +49,15 @@ export function loadCatalog(forceRefresh = false): Promise<CatalogLoadResult> {
 }
 
 async function loadCatalogInternal(forceRefresh: boolean): Promise<CatalogLoadResult> {
+  const smokeAcceptanceUrl = process.env.TVFEED_SMOKE_ACCEPTANCE_URL
+  if (process.env.TVFEED_SMOKE_OUTPUT && process.env.TVFEED_SMOKE_PLAY === '1' && smokeAcceptanceUrl) {
+    return {
+      catalog: applyProjectDenylist(createHlsAcceptanceCatalog(smokeAcceptanceUrl)),
+      cacheStatus: 'offline-sample',
+      warning: 'HLS 验收模式：频道目录使用内置虚构样例，媒体只使用本次运行传入的测试源。'
+    }
+  }
+
   const cache = await readCache()
 
   if (process.env.TVFEED_OFFLINE_DEMO === '1') {
@@ -64,6 +73,9 @@ async function loadCatalogInternal(forceRefresh: boolean): Promise<CatalogLoadRe
   }
 
   try {
+    if (process.env.TVFEED_SMOKE_OUTPUT && process.env.TVFEED_SMOKE_FORCE_NETWORK_FAILURE === '1') {
+      throw new Error('验收模式模拟目录网络失败')
+    }
     const bundle = await fetchUpstreamBundle()
     const catalog = transformIptvData(bundle)
     if (catalog.channels.length === 0) throw new Error('目录过滤后没有可用频道')
