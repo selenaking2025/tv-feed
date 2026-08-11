@@ -40,6 +40,7 @@ npm run typecheck
 npm test
 npm run build
 npm run smoke
+npm run verify:public-release
 ```
 
 私有仓库的 GitHub Actions 会在每次推送到 `main` 和每个 Pull Request 上使用官方 npm registry 执行全新 `npm ci`、仓库边界检查、类型检查、单元测试和生产构建。仓库边界检查会拒绝频道缓存、M3U、安装包、未批准图片、常见凭据、非官方依赖下载地址，以及渲染进程直接联网等回归。
@@ -70,7 +71,7 @@ TVFEED_SMOKE_LIVE=1 TVFEED_SMOKE_PLAY=1 npm run smoke
 npm run pack:mac
 ```
 
-产物位于 `release/mac-arm64/TV Feed.app`。该脚本生成未签名的本地开发包，不代表已完成 Apple 签名、公证或公开发行。
+产物位于 `release/mac-arm64/TV Feed.app`。该脚本只使用本机 ad-hoc 签名封装开发包，以确保资源完整性和本机可运行性；它没有使用 Apple Developer ID，不提供可验证的发布者身份，也未经过 Apple 公证，因此不代表正式可信发行版。
 
 ## 数据与内容边界
 

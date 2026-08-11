@@ -36,6 +36,9 @@ jobs:
       - name: Verify repository boundaries
         run: npm run verify:repository
 
+      - name: Verify public-release document and license boundaries
+        run: npm run verify:public-release:static
+
       - name: Type-check
         run: npm run typecheck
 
