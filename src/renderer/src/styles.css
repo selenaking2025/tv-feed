@@ -1320,6 +1320,14 @@ button:not(:disabled):active {
   background: var(--accent);
 }
 
+.channel-health[data-state="waiting-network"] {
+  color: #d8dda9;
+}
+
+.channel-health[data-state="waiting-network"]::before {
+  background: #d8dda9;
+}
+
 .channel-health[data-state="unavailable"] {
   color: #ffc1c1;
 }

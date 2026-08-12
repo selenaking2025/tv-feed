@@ -29,6 +29,7 @@
 | 持久化目录 | `catalog-v2.json` | `CatalogCacheRepository` | `CatalogCoordinator` |
 | IPC 名称与桥接形状 | `src/shared/ipc-contract.ts` | 共享契约模块 | main、preload、renderer |
 | 远程请求和媒体流票据 | `RemoteResourceBroker` | 主进程 | HLS 加载器、远程台标控制器 |
+| 当前本机网络可用性快照 | Electron 主进程的 `net.isOnline()` | 主进程 | `RemoteResourceBroker`、网络状态 IPC、播放恢复门禁 |
 | 收藏、最近观看、线路健康 | 浏览器本地存储 | 渲染端本地状态模块 | 界面与播放器 |
 | 家庭/官方/denylist 政策 | `src/shared` 下的政策表 | 仓库维护者 | 目录过滤、徽标、策略版本和 CI |
 
@@ -135,7 +136,15 @@ Renderer UI
 - `safety-coordinator.ts`：安全状态机和恢复；
 - `index.ts`：组件组装、窗口与应用生命周期。
 
-preload 只公开 `TvFeedBridge`，所有通道名来自共享常量，并对主进程推送的进度载荷做运行时检查。渲染端把安全迁移和兼容投影放在 `SafetyClient`，把远程台标队列、取消和对象 URL 生命周期放在 `RemoteLogoController`，把通用本地存储放在 `local-state.ts`。
+preload 只公开 `TvFeedBridge`，所有通道名来自共享常量，并对主进程推送的进度载荷做运行时检查。远程资源失败通过固定、无 URL 的结果信封跨进程传递，不依赖异常文字作为接口。渲染端把安全迁移和兼容投影放在 `SafetyClient`，把远程台标队列、取消和对象 URL 生命周期放在 `RemoteLogoController`，把通用本地存储放在 `local-state.ts`。
+
+### 播放网络中断与恢复
+
+- `RemoteResourceBroker` 结合安全网络失败类别和主进程网络快照，把本机断网、临时 DNS 服务中断或代理连接问题归为 `network-unavailable`；单个源站的确定性 DNS 失败仍归为 `dns-failure`。
+- 渲染端的 `online` 事件只用于触发检查，不能作为网络事实。自动恢复前必须通过类型化 IPC 重新读取主进程快照；对流传输中途才暴露的普通离线、超时或 DNS 失败，在写入线路健康前也会做同样确认。
+- `network-unavailable` 不写入线路健康失败记录，也不把当前线路加入失败集合，更不会连续切换其他线路；内存门禁只保留当前频道、线路和代次。
+- 首次中断可进行一次延迟检查；在线事件和用户点击播放也可触发检查。每次恢复必须匹配仍然选中的频道和线路；一次确认只能认领一次代次，失败后的 30 秒内不再自动安排新的延迟检查，防止失败循环。
+- 切换频道、手动选择线路、停止播放或成功开始播放都会使旧代次终止。没有持久化恢复标记，也没有第二套网络权威，因此重启后不存在待回放动作。
 
 完整冒烟实现位于 `scripts/smoke-driver.mjs`，不进入 `src`，也不在打包文件列表中。测试启动器只在显式冒烟环境下传入驱动绝对路径；正常应用只保留一个惰性加载接口，没有 DOM 验收脚本和测试源逻辑。
 
@@ -147,6 +156,7 @@ preload 只公开 `TvFeedBridge`，所有通道名来自共享常量，并对主
 - 在共享契约之外声明 IPC 通道字面量；
 - 在 `runtime-config.ts` 之外读取 `TVFEED_SMOKE_*`；
 - 在渲染入口重新读取家庭安全或远程台标旧键作为权威；
+- 在渲染端读取 `navigator.onLine` 作为网络权威，或收到 `online` 事件后未经主进程确认就恢复播放；
 - 重新创建单体 `shared/contracts.ts`；
 - 把冒烟驱动放回生产源码或让主入口重新承担 IPC、协议、资源代理职责；
 - 缺少本架构记录或关键权威/迁移/恢复章节。

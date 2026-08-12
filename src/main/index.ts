@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session } from 'electron'
+import { app, BrowserWindow, net, session } from 'electron'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { APP_PROTOCOL, IPC_CHANNELS } from '../shared/ipc-contract.ts'
@@ -38,6 +38,7 @@ app.whenReady().then(async () => {
   })
   resources = new RemoteResourceBroker({
     assertAllowed: (kind) => safety.assertRemoteResourceAllowed(kind),
+    isNetworkOnline: () => net.isOnline(),
     rendererUrl: runtime.rendererUrl
   })
   remoteResources = resources
@@ -52,6 +53,7 @@ app.whenReady().then(async () => {
     catalog,
     safety,
     resources,
+    isNetworkOnline: () => net.isOnline(),
     onRendererReady: (webContents) => {
       if (!runtime.smoke.enabled || smokeHandled) return
       smokeHandled = true

@@ -107,6 +107,9 @@ export function findRendererBoundaryViolations(entries) {
       rule.pattern.lastIndex = 0
       if (rule.pattern.test(networkScanText)) violations.push(`${file}: 渲染进程不得直接使用 ${rule.name}`)
     }
+    if (/\bnavigator\.onLine\b/.test(text)) {
+      violations.push(`${file}: 渲染进程不得把 navigator.onLine 作为网络状态权威`)
+    }
   }
 
   for (const requiredFile of ['src/main/app-protocol.ts', 'src/renderer/index.html']) {
@@ -142,6 +145,12 @@ export function findRendererBoundaryViolations(entries) {
   if (/tvfeed:(?:family-safety|remote-logos):v1/.test(rendererMain) || /readStoredBoolean\s*\(/.test(rendererMain)) {
     violations.push('src/renderer/src/main.ts: 不得把旧本地安全偏好重新作为渲染入口权威')
   }
+  if (
+    /addEventListener\(\s*['"]online['"]/.test(rendererMain) &&
+    !/window\.tvFeed\.isNetworkOnline\s*\(\s*\)/.test(rendererMain)
+  ) {
+    violations.push('src/renderer/src/main.ts: 网络恢复事件必须经主进程重新确认后才能触发播放')
+  }
   const safetyClient = entries.get('src/renderer/src/safety-client.ts') ?? ''
   if (!/initializeSafetyState\s*\(/.test(safetyClient) || !/state\.familySafety/.test(safetyClient) || !/state\.remoteLogos/.test(safetyClient)) {
     violations.push('src/renderer/src/safety-client.ts: 缺少主进程安全初始化或兼容投影')
@@ -172,7 +181,7 @@ export function findArchitectureBoundaryViolations(entries) {
     violations.push('src/main/smoke-driver.ts: 完整冒烟驱动不得进入生产源码')
   }
 
-  const ipcLiteral = /['"](?:catalog|safety|remote-resource|app|player-fullscreen|renderer):[A-Za-z0-9:-]+['"]/g
+  const ipcLiteral = /['"](?:catalog|safety|remote-resource|network|app|player-fullscreen|renderer):[A-Za-z0-9:-]+['"]/g
   for (const [rawFile, text] of entries) {
     const file = normalizePath(rawFile)
     if (!file.startsWith('src/')) continue

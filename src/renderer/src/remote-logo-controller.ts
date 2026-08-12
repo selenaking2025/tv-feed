@@ -37,7 +37,12 @@ export class RemoteLogoController {
       const requestId = `logo-${Date.now().toString(36)}-${(++this.requestSequence).toString(36)}`
       this.activeRequestIds.add(requestId)
       try {
-        const response = await this.bridge.fetchRemoteResource({ requestId, url, kind: 'logo' })
+        const result = await this.bridge.fetchRemoteResource({ requestId, url, kind: 'logo' })
+        if (!result.ok) {
+          image.remove()
+          return
+        }
+        const response = result.response
         if (!this.allowed || !wrapper.isConnected) return
         const objectUrl = URL.createObjectURL(new Blob([Uint8Array.from(response.body).buffer], { type: response.contentType }))
         this.activeObjectUrls.add(objectUrl)

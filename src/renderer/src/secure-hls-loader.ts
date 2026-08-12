@@ -7,11 +7,14 @@ import {
   type LoaderContext,
   type LoaderStats
 } from 'hls.js'
-import type {
-  RemoteResourceKind,
-  RemoteResourceResponse,
-  RemoteResourceStreamTicket
+import {
+  isRemoteResourceFailureCode,
+  REMOTE_RESOURCE_FAILURE_HEADER,
+  type RemoteResourceKind,
+  type RemoteResourceResponse,
+  type RemoteResourceStreamTicket
 } from '../../shared/remote-resource-contracts.ts'
+import { playbackDiagnosticInputForRemoteFailure } from '../../shared/playback-diagnostics.ts'
 
 let requestSequence = 0
 const MAX_STREAM_BYTES = 32 * 1_024 * 1_024
@@ -73,7 +76,10 @@ export class SecureHlsLoader implements Loader<LoaderContext> {
       return
     }
     void window.tvFeed.fetchRemoteResource(request)
-      .then((response) => this.succeedBuffered(response), (error: unknown) => this.fail(error))
+      .then((result) => {
+        if (result.ok) this.succeedBuffered(result.response)
+        else this.fail(playbackDiagnosticInputForRemoteFailure(result.failure.code))
+      }, (error: unknown) => this.fail(error))
   }
 
   abort(): void {
@@ -158,7 +164,13 @@ export class SecureHlsLoader implements Loader<LoaderContext> {
         referrerPolicy: 'no-referrer',
         signal: controller.signal
       })
-      if (!response.ok) throw new Error(`安全媒体流返回 HTTP ${response.status}`)
+      if (!response.ok) {
+        const failureCode = response.headers.get(REMOTE_RESOURCE_FAILURE_HEADER)
+        if (isRemoteResourceFailureCode(failureCode)) {
+          throw new Error(playbackDiagnosticInputForRemoteFailure(failureCode))
+        }
+        throw new Error(`安全媒体流返回 HTTP ${response.status}`)
+      }
       if (!response.body) throw new Error('安全媒体流没有可读取的正文')
       if (this.completed || this.stats.aborted) {
         await response.body.cancel().catch(() => undefined)

@@ -7,7 +7,13 @@ import type {
   LoaderResponse
 } from 'hls.js'
 import { resourceKind, resourceRange, SecureHlsLoader } from '../src/renderer/src/secure-hls-loader.ts'
-import type { RemoteResourceRequest, RemoteResourceResponse } from '../src/shared/remote-resource-contracts.ts'
+import {
+  REMOTE_RESOURCE_FAILURE_HEADER,
+  type RemoteResourceFetchResult,
+  type RemoteResourceRequest,
+  type RemoteResourceResponse
+} from '../src/shared/remote-resource-contracts.ts'
+import { classifyPlaybackDiagnostic } from '../src/shared/playback-diagnostics.ts'
 
 const LOADER_CONFIGURATION: LoaderConfiguration = {
   loadPolicy: {
@@ -59,9 +65,9 @@ test('安全 HLS Loader 让小资源走 IPC、大分片只读取一次性应用�
         })
       },
       tvFeed: {
-        fetchRemoteResource: async (request: RemoteResourceRequest): Promise<RemoteResourceResponse> => {
+        fetchRemoteResource: async (request: RemoteResourceRequest): Promise<RemoteResourceFetchResult> => {
           bufferedRequests.push(request)
-          return responseFor(request)
+          return { ok: true, response: responseFor(request) }
         },
         prepareRemoteResourceStream: async (request: RemoteResourceRequest) => {
           streamRequests.push(request)
@@ -97,7 +103,7 @@ test('安全 HLS Loader 让小资源走 IPC、大分片只读取一次性应用�
 
 test('切台或销毁 Loader 会取消尚未完成的主进程请求并忽略迟到响应', async () => {
   const cancelled: string[] = []
-  let resolveRemote: ((response: RemoteResourceResponse) => void) | undefined
+  let resolveRemote: ((response: RemoteResourceFetchResult) => void) | undefined
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
@@ -105,7 +111,7 @@ test('切台或销毁 Loader 会取消尚未完成的主进程请求并忽略迟
       setTimeout,
       clearTimeout,
       tvFeed: {
-        fetchRemoteResource: () => new Promise<RemoteResourceResponse>((resolve) => {
+        fetchRemoteResource: () => new Promise<RemoteResourceFetchResult>((resolve) => {
           resolveRemote = resolve
         }),
         prepareRemoteResourceStream: async () => ({
@@ -129,7 +135,10 @@ test('切台或销毁 Loader 会取消尚未完成的主进程请求并忽略迟
     loader.abort()
     assert.equal(cancelled.length, 1)
     assert.equal(aborted, true)
-    resolveRemote?.(responseFor({ requestId: 'late', url: 'https://media.example.com/live.m3u8', kind: 'hls-playlist' }))
+    resolveRemote?.({
+      ok: true,
+      response: responseFor({ requestId: 'late', url: 'https://media.example.com/live.m3u8', kind: 'hls-playlist' })
+    })
     await Promise.resolve()
     assert.equal(succeeded, false)
   } finally {
@@ -189,6 +198,48 @@ test('二进制安全媒体流逐块触发进度回调，不在 Loader 中重新
     })
     assert.deepEqual(progress, [[1, 2, 3, 4]])
     assert.equal((response.data as ArrayBuffer).byteLength, 0)
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else Reflect.deleteProperty(globalThis, 'window')
+  }
+})
+
+test('缓冲与流式请求都把主进程固定失败类别传给播放诊断', async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      setTimeout,
+      clearTimeout,
+      fetch: async (): Promise<Response> => new Response('unavailable', {
+        status: 503,
+        headers: { [REMOTE_RESOURCE_FAILURE_HEADER]: 'network-unavailable' }
+      }),
+      tvFeed: {
+        fetchRemoteResource: async (): Promise<RemoteResourceFetchResult> => ({
+          ok: false,
+          failure: { code: 'network-unavailable', retryable: true }
+        }),
+        prepareRemoteResourceStream: async () => ({
+          streamUrl: 'tvfeed://app/__hls_stream/abcdefghijklmnopqrstuvwxyz_123456'
+        }),
+        cancelRemoteResource: () => undefined
+      }
+    }
+  })
+
+  try {
+    const bufferedFailure = await load({
+      url: 'https://media.example.com/live.m3u8',
+      responseType: ''
+    }).then(() => assert.fail('buffered request should fail'), (error: unknown) => error)
+    const streamFailure = await load({
+      url: 'https://media.example.com/segment.ts',
+      responseType: 'arraybuffer'
+    }).then(() => assert.fail('stream request should fail'), (error: unknown) => error)
+
+    assert.equal(classifyPlaybackDiagnostic(bufferedFailure).code, 'network-unavailable')
+    assert.equal(classifyPlaybackDiagnostic(streamFailure).code, 'network-unavailable')
   } finally {
     if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
     else Reflect.deleteProperty(globalThis, 'window')

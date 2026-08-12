@@ -1,6 +1,12 @@
-import type { RemoteResourceKind, RemoteResourceRequest } from '../shared/remote-resource-contracts.ts'
+import {
+  REMOTE_RESOURCE_FAILURE_HEADER,
+  type RemoteResourceFetchResult,
+  type RemoteResourceKind,
+  type RemoteResourceRequest
+} from '../shared/remote-resource-contracts.ts'
 import { APP_PROTOCOL } from '../shared/ipc-contract.ts'
 import { OneTimeTicketRegistry } from './one-time-ticket-registry.ts'
+import { toRemoteResourceFailure } from './remote-resource-failure.ts'
 import { fetchRemoteResource, validateRemoteResourceRequest } from './remote-resource-service.ts'
 import { streamRemoteResource, validateRemoteStreamRequest } from './remote-resource-stream.ts'
 
@@ -25,11 +31,19 @@ interface RemoteStreamTicketEntry {
 
 export interface RemoteResourceBrokerOptions {
   assertAllowed: (kind: RemoteResourceKind) => void
+  isNetworkOnline: () => boolean
   rendererUrl: string
+}
+
+export interface RemoteResourceBrokerDependencies {
+  fetchResource?: typeof fetchRemoteResource
+  streamResource?: typeof streamRemoteResource
 }
 
 export class RemoteResourceBroker {
   private readonly options: RemoteResourceBrokerOptions
+  private readonly fetchResource: typeof fetchRemoteResource
+  private readonly streamResource: typeof streamRemoteResource
   private readonly active = new Map<string, ActiveRemoteFetch>()
   private readonly tickets = new OneTimeTicketRegistry<RemoteStreamTicketEntry>(
     REMOTE_STREAM_TICKET_TTL_MS,
@@ -37,15 +51,20 @@ export class RemoteResourceBroker {
   )
   private sweepTimer: ReturnType<typeof setInterval> | undefined
 
-  constructor(options: RemoteResourceBrokerOptions) {
+  constructor(
+    options: RemoteResourceBrokerOptions,
+    dependencies: RemoteResourceBrokerDependencies = {}
+  ) {
     this.options = options
+    this.fetchResource = dependencies.fetchResource ?? fetchRemoteResource
+    this.streamResource = dependencies.streamResource ?? streamRemoteResource
   }
 
   start(): void {
     if (this.sweepTimer === undefined) this.sweepTimer = setInterval(() => this.expireTickets(), 5_000)
   }
 
-  async fetch(senderId: number, input: unknown) {
+  async fetch(senderId: number, input: unknown): Promise<RemoteResourceFetchResult> {
     const request = validateRemoteResourceRequest(input)
     this.options.assertAllowed(request.kind)
     this.reserve(senderId, request.requestId)
@@ -53,7 +72,12 @@ export class RemoteResourceBroker {
     const controller = new AbortController()
     this.active.set(key, { controller, senderId, kind: request.kind, mode: 'buffered', streamToken: '' })
     try {
-      return await fetchRemoteResource(request, controller.signal)
+      return { ok: true, response: await this.fetchResource(request, controller.signal) }
+    } catch (error) {
+      return {
+        ok: false,
+        failure: toRemoteResourceFailure(error, this.options.isNetworkOnline())
+      }
     } finally {
       this.finish(key, controller)
     }
@@ -133,7 +157,7 @@ export class RemoteResourceBroker {
     active.streamToken = ''
 
     try {
-      const result = await streamRemoteResource(entry.request, entry.controller.signal)
+      const result = await this.streamResource(entry.request, entry.controller.signal)
       const iterator = result.body[Symbol.asyncIterator]()
       let finished = false
       const finish = (): void => {
@@ -175,16 +199,18 @@ export class RemoteResourceBroker {
       if (result.contentRange) headers.set('Content-Range', result.contentRange)
       if (result.acceptRanges) headers.set('Accept-Ranges', result.acceptRanges)
       return new Response(body, { status: result.statusCode, headers })
-    } catch {
+    } catch (error) {
       this.finish(entry.key, entry.controller)
+      const failure = toRemoteResourceFailure(error, this.options.isNetworkOnline())
+      const headers = new Headers(corsHeaders)
+      headers.set('Cache-Control', 'no-store')
+      headers.set('Content-Type', 'text/plain; charset=utf-8')
+      headers.set('X-Content-Type-Options', 'nosniff')
+      headers.set(REMOTE_RESOURCE_FAILURE_HEADER, failure.code)
+      headers.set('Access-Control-Expose-Headers', REMOTE_RESOURCE_FAILURE_HEADER)
       return new Response('安全媒体流无法建立', {
-        status: 502,
-        headers: {
-          ...corsHeaders,
-          'Cache-Control': 'no-store',
-          'Content-Type': 'text/plain; charset=utf-8',
-          'X-Content-Type-Options': 'nosniff'
-        }
+        status: failure.code === 'network-unavailable' ? 503 : 502,
+        headers
       })
     }
   }

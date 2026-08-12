@@ -52,6 +52,15 @@ test('渲染进程网络门禁拒绝直接 fetch 并要求 CSP 和远程台标�
   assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /不得把旧本地安全偏好/)
   safeEntries.set('src/renderer/src/main.ts', 'const safetyClient = new SafetyClient(window.tvFeed)')
 
+  safeEntries.set('src/renderer/src/network-state.ts', 'const online = navigator.onLine')
+  assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /不得把 navigator\.onLine 作为网络状态权威/)
+  safeEntries.delete('src/renderer/src/network-state.ts')
+
+  safeEntries.set('src/renderer/src/main.ts', `const safetyClient = new SafetyClient(window.tvFeed)\nwindow.addEventListener('online', retryPlayback)`)
+  assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /必须经主进程重新确认/)
+  safeEntries.set('src/renderer/src/main.ts', `const safetyClient = new SafetyClient(window.tvFeed)\nwindow.addEventListener('online', () => window.tvFeed.isNetworkOnline())`)
+  assert.deepEqual(findRendererBoundaryViolations(safeEntries), [])
+
   safeEntries.set('src/renderer/src/direct.ts', 'fetch("https://example.com")')
   assert.match(findRendererBoundaryViolations(safeEntries).join('\n'), /不得直接使用 fetch/)
 

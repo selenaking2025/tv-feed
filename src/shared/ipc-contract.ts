@@ -5,8 +5,8 @@ import type {
   CatalogSyncProgress
 } from './catalog-contracts.ts'
 import type {
+  RemoteResourceFetchResult,
   RemoteResourceRequest,
-  RemoteResourceResponse,
   RemoteResourceStreamTicket
 } from './remote-resource-contracts.ts'
 import type {
@@ -33,6 +33,7 @@ export const IPC_CHANNELS = Object.freeze({
   remoteFetch: 'remote-resource:fetch',
   remotePrepareStream: 'remote-resource:prepare-stream',
   remoteCancel: 'remote-resource:cancel',
+  networkStatus: 'network:status',
   appVersion: 'app:version',
   playerSetFullscreen: 'player-fullscreen:set',
   playerFullscreenChanged: 'player-fullscreen:changed',
@@ -49,9 +50,10 @@ export interface TvFeedBridge {
   loadOfflineDemo(): Promise<CatalogLoadResult>
   onCatalogSyncProgress(listener: (progress: CatalogSyncProgress) => void): () => void
   clearCatalogCache(): Promise<boolean>
-  fetchRemoteResource(request: RemoteResourceRequest): Promise<RemoteResourceResponse>
+  fetchRemoteResource(request: RemoteResourceRequest): Promise<RemoteResourceFetchResult>
   prepareRemoteResourceStream(request: RemoteResourceRequest): Promise<RemoteResourceStreamTicket>
   cancelRemoteResource(requestId: string): void
+  isNetworkOnline(): Promise<boolean>
   getAppVersion(): Promise<string>
   setPlayerFullscreen(fullscreen: boolean): Promise<boolean>
   onPlayerFullscreenChange(listener: (fullscreen: boolean) => void): () => void

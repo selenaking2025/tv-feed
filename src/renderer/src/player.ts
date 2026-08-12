@@ -17,11 +17,11 @@ const AUTOPLAY_BUFFER_TARGET_SECONDS = 5
 const AUTOPLAY_BUFFER_MAX_WAIT_MS = 8_000
 const STALL_RECOVERY_WINDOW_MS = 8_000
 
-export type PlaybackState = 'idle' | 'loading' | 'playing' | 'paused' | 'error'
+export type PlaybackState = 'idle' | 'loading' | 'playing' | 'paused' | 'waiting-network' | 'error'
 
 interface PlayerCallbacks {
   onState(state: PlaybackState, message: string): void
-  onFatal(diagnostic: PlaybackDiagnostic): void
+  onFatal(source: CatalogSource, diagnostic: PlaybackDiagnostic): void
   onMetrics(snapshot: PlaybackMetricsSnapshot): void
 }
 
@@ -234,16 +234,17 @@ export class StreamPlayer {
 
   private fail(...inputs: readonly unknown[]): void {
     if (!this.currentSource) return
+    const failedSource = this.currentSource
     const diagnostic = classifyPlaybackDiagnostic(...inputs)
     this.loadGeneration += 1
     this.shouldAutoplay = false
     this.finishStall()
     this.stopMetricsTimer()
     this.emitMetrics()
-    this.callbacks.onState('error', diagnostic.message)
+    this.callbacks.onState(diagnostic.code === 'network-unavailable' ? 'waiting-network' : 'error', diagnostic.message)
     this.hls?.destroy()
     this.hls = undefined
-    this.callbacks.onFatal(diagnostic)
+    this.callbacks.onFatal(failedSource, diagnostic)
   }
 
   private releaseMedia(): void {

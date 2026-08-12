@@ -1,13 +1,9 @@
-export type PlaybackDiagnosticCode =
-  | 'dns-failure'
-  | 'unsafe-target'
-  | 'redirect-rejected'
-  | 'response-too-large'
-  | 'invalid-playlist'
-  | 'access-restricted'
-  | 'source-timeout'
-  | 'unsupported-media'
-  | 'source-offline'
+import {
+  REMOTE_RESOURCE_FAILURE_CODES,
+  type RemoteResourceFailureCode
+} from './remote-resource-contracts.ts'
+
+export type PlaybackDiagnosticCode = RemoteResourceFailureCode | 'unsupported-media'
 
 export interface PlaybackDiagnostic {
   code: PlaybackDiagnosticCode
@@ -16,10 +12,15 @@ export interface PlaybackDiagnostic {
 }
 
 const DIAGNOSTICS: Readonly<Record<PlaybackDiagnosticCode, PlaybackDiagnostic>> = Object.freeze({
+  'network-unavailable': Object.freeze({
+    code: 'network-unavailable',
+    title: '网络连接暂时不可用',
+    message: '请检查 Wi-Fi、VPN 或系统代理。连接恢复后会重试当前线路。'
+  }),
   'dns-failure': Object.freeze({
     code: 'dns-failure',
-    title: '域名无法解析',
-    message: '第三方源站的域名目前无法解析。'
+    title: '源站域名无法解析',
+    message: '这条线路的源站域名当前不可用，请稍后重试或选择其他线路。'
   }),
   'unsafe-target': Object.freeze({
     code: 'unsafe-target',
@@ -63,6 +64,12 @@ const DIAGNOSTICS: Readonly<Record<PlaybackDiagnosticCode, PlaybackDiagnostic>> 
   })
 })
 
+const REMOTE_FAILURE_INPUT_PREFIX = 'tvfeed-remote-failure:'
+
+export function playbackDiagnosticInputForRemoteFailure(code: RemoteResourceFailureCode): string {
+  return `${REMOTE_FAILURE_INPUT_PREFIX}${code}`
+}
+
 /**
  * Converts untrusted network and media errors into a fixed, URL-free message.
  * The original input is only inspected for category matching and is never
@@ -70,6 +77,10 @@ const DIAGNOSTICS: Readonly<Record<PlaybackDiagnosticCode, PlaybackDiagnostic>> 
  */
 export function classifyPlaybackDiagnostic(...inputs: readonly unknown[]): PlaybackDiagnostic {
   const value = inputs.map(normalizeDiagnosticInput).filter(Boolean).join(' ').toLocaleLowerCase()
+
+  for (const code of REMOTE_RESOURCE_FAILURE_CODES) {
+    if (value.includes(playbackDiagnosticInputForRemoteFailure(code))) return DIAGNOSTICS[code]
+  }
 
   if (matches(value, [
     '非公网',

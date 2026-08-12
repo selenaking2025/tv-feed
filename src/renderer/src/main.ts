@@ -15,7 +15,11 @@ import type {
 } from '../../shared/catalog-contracts.ts'
 import { displayCountryName, getCountrySearchAliases, sortCountriesForDisplay } from '../../shared/countries.ts'
 import { hasVerifiedOfficialSource, isVerifiedOfficialSource } from '../../shared/official-sources.ts'
-import type { PlaybackDiagnostic } from '../../shared/playback-diagnostics.ts'
+import {
+  classifyPlaybackDiagnostic,
+  playbackDiagnosticInputForRemoteFailure,
+  type PlaybackDiagnostic
+} from '../../shared/playback-diagnostics.ts'
 import type { PlaybackMetricsSnapshot } from '../../shared/playback-metrics.ts'
 import type { SafetyStateSnapshot } from '../../shared/safety-contracts.ts'
 import {
@@ -26,6 +30,10 @@ import {
   serializeSourceHealthStore
 } from '../../shared/source-health.ts'
 import { StreamPlayer, type PlaybackState } from './player.ts'
+import {
+  PlaybackNetworkRecoveryGate,
+  type PlaybackNetworkTarget
+} from './playback-network-recovery.ts'
 import {
   readStoredArray,
   readStoredString,
@@ -44,6 +52,8 @@ const FAVORITES_KEY = 'tvfeed:favorites:v1'
 const RECENTS_KEY = 'tvfeed:recents:v1'
 const LAST_CHANNEL_KEY = 'tvfeed:last-channel:v1'
 const SOURCE_HEALTH_KEY = 'tvfeed:source-health:v1'
+const NETWORK_RECOVERY_DELAY_MS = 3_000
+const NETWORK_RECOVERY_COOLDOWN_MS = 30_000
 const CHINESE_REGIONS = new Set(['CN', 'HK', 'TW', 'MO'])
 const compactSidebarQuery = window.matchMedia('(max-width: 1040px)')
 
@@ -127,12 +137,16 @@ let channelNumberBuffer = ''
 let channelNumberTimer: number | undefined
 let announcementTimer: number | undefined
 let fullscreenTransitionInProgress = false
+let playbackAttemptGeneration = 0
+let networkRecoveryTimer: number | undefined
+let networkRecoveryCheckGeneration: number | undefined
 const safetyClient = new SafetyClient(window.tvFeed)
 const remoteLogoController = new RemoteLogoController(window.tvFeed)
+const networkRecovery = new PlaybackNetworkRecoveryGate(NETWORK_RECOVERY_COOLDOWN_MS)
 
 const player = new StreamPlayer(elements.video, {
   onState: updatePlaybackState,
-  onFatal: handleFatalSource,
+  onFatal: (source, diagnostic) => void handleFatalSource(source, diagnostic),
   onMetrics: handlePlaybackMetrics
 })
 
@@ -207,6 +221,7 @@ function bindEvents(): void {
 
   document.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('resize', renderVirtualRows)
+  window.addEventListener('online', () => void retryPendingNetworkPlayback('online'))
   new ResizeObserver(renderVirtualRows).observe(elements.channelList)
   syncSidebarState()
   syncFullscreenControl(false)
@@ -426,6 +441,8 @@ function handleRowKeydown(event: KeyboardEvent): void {
 function selectChannel(channelId: string, autoplay: boolean, rememberRecent: boolean): void {
   const channel = getChannel(channelId)
   if (!channel) return
+  playbackAttemptGeneration += 1
+  resetNetworkRecovery()
   selectedChannelId = channel.id
   activeSourceIndex = preferredSource(channel)?.index ?? 0
   failedSources = new Set()
@@ -461,7 +478,7 @@ function renderChannelDetail(channel: CatalogChannel): void {
   elements.detailLogo.replaceWith(createDetailLogo(channel))
   elements.detailLogo = required<HTMLElement>('#detail-logo')
   updateFavoriteButton()
-  elements.sourceHelp.textContent = `${channel.sources.length} 条浏览器兼容线路；根据本机播放结果优先稳定线路，失败时自动切换。`
+  elements.sourceHelp.textContent = `${channel.sources.length} 条浏览器兼容线路；线路自身失败时自动切换，本机断网时保留当前线路。`
 }
 
 function createDetailLogo(channel: CatalogChannel): HTMLElement {
@@ -654,6 +671,7 @@ function renderSources(channel: CatalogChannel): void {
     button.title = verifiedOfficial ? `${label}（已核对官方主机）` : label
     button.setAttribute('aria-label', verifiedOfficial ? `${label}，官方源` : label)
     button.addEventListener('click', () => {
+      resetNetworkRecovery()
       failedSources = new Set()
       playSource(source, index)
     })
@@ -665,6 +683,8 @@ function renderSources(channel: CatalogChannel): void {
 function playSource(source: CatalogSource, index: number, preserveDiagnostic = false): void {
   const channel = getChannel(selectedChannelId)
   if (!channel) return
+  playbackAttemptGeneration += 1
+  cancelPendingNetworkRecovery()
   activeSourceIndex = index
   addRecent(channel.id)
   elements.playerEmpty.hidden = true
@@ -720,22 +740,111 @@ function clearSourceHealthRecords(): void {
   removeStoredValue(SOURCE_HEALTH_KEY)
 }
 
-function handleFatalSource(diagnostic: PlaybackDiagnostic): void {
+async function handleFatalSource(failedSource: CatalogSource, diagnostic: PlaybackDiagnostic): Promise<void> {
+  const failedAttemptGeneration = playbackAttemptGeneration
+  let effectiveDiagnostic = diagnostic
+  if (shouldConfirmLocalNetwork(diagnostic)) {
+    try {
+      if (!await window.tvFeed.isNetworkOnline()) {
+        effectiveDiagnostic = classifyPlaybackDiagnostic(
+          playbackDiagnosticInputForRemoteFailure('network-unavailable')
+        )
+      }
+    } catch {
+      // A failed status check must not suppress the original source failure.
+    }
+  }
+
+  if (failedAttemptGeneration !== playbackAttemptGeneration) return
   const channel = getChannel(selectedChannelId)
   const current = channel?.sources[activeSourceIndex]
-  if (!channel || !current) return
-  renderPlaybackDiagnostic(diagnostic)
+  if (!channel || !current || current.id !== failedSource.id) return
+  renderPlaybackDiagnostic(effectiveDiagnostic)
+  if (effectiveDiagnostic.code === 'network-unavailable') {
+    updatePlaybackState('waiting-network', effectiveDiagnostic.message)
+    networkRecovery.suspend({ channelId: channel.id, sourceId: current.id, sourceIndex: activeSourceIndex })
+    updateChannelHealth('waiting-network')
+    scheduleNetworkRecoveryCheck()
+    showToast('网络暂时不可用，已暂停自动切换线路', 6000)
+    return
+  }
+  resetNetworkRecovery()
   sourceHealthRecords = recordSourceFailure(sourceHealthRecords, current.id)
   persistSourceHealthRecords()
   failedSources.add(current.id)
   const next = preferredSource(channel, failedSources)
   if (next) {
-    showToast(`${diagnostic.title}，正在尝试线路 ${next.index + 1}`)
+    showToast(`${effectiveDiagnostic.title}，正在尝试线路 ${next.index + 1}`)
     playSource(next.source, next.index, true)
     return
   }
-  updatePlaybackState('error', `${diagnostic.title}：${diagnostic.message}`)
-  showToast(`所有线路均连接失败；最后一次：${diagnostic.title}`, 6000)
+  updatePlaybackState('error', `${effectiveDiagnostic.title}：${effectiveDiagnostic.message}`)
+  showToast(`所有线路均连接失败；最后一次：${effectiveDiagnostic.title}`, 6000)
+}
+
+function shouldConfirmLocalNetwork(diagnostic: PlaybackDiagnostic): boolean {
+  return diagnostic.code === 'dns-failure' ||
+    diagnostic.code === 'source-timeout' ||
+    diagnostic.code === 'source-offline'
+}
+
+function scheduleNetworkRecoveryCheck(): void {
+  if (networkRecoveryTimer !== undefined || !networkRecovery.shouldSchedule(Date.now())) return
+  networkRecoveryTimer = window.setTimeout(() => {
+    networkRecoveryTimer = undefined
+    void retryPendingNetworkPlayback('scheduled')
+  }, NETWORK_RECOVERY_DELAY_MS)
+}
+
+async function retryPendingNetworkPlayback(trigger: 'manual' | 'online' | 'scheduled'): Promise<boolean> {
+  const pending = networkRecovery.snapshot()
+  if (!pending) return false
+  if (networkRecoveryCheckGeneration === pending.generation) return true
+  networkRecoveryCheckGeneration = pending.generation
+
+  let confirmedOnline = false
+  try {
+    confirmedOnline = await window.tvFeed.isNetworkOnline()
+  } catch {
+    if (trigger === 'manual') showToast('暂时无法确认网络状态，请稍后再试')
+    return true
+  } finally {
+    if (networkRecoveryCheckGeneration === pending.generation) networkRecoveryCheckGeneration = undefined
+  }
+
+  const target = networkRecovery.claim(pending, confirmedOnline, currentNetworkTarget(), Date.now())
+  if (!confirmedOnline) {
+    if (trigger === 'manual') showToast('网络仍不可用，请检查 Wi-Fi、VPN 或系统代理', 6000)
+    return true
+  }
+  if (!target) return true
+
+  const channel = getChannel(target.channelId)
+  const source = channel?.sources[target.sourceIndex]
+  if (!channel || !source || source.id !== target.sourceId) return true
+  showToast('正在重新连接当前线路')
+  playSource(source, target.sourceIndex)
+  return true
+}
+
+function currentNetworkTarget(): PlaybackNetworkTarget | undefined {
+  const channel = getChannel(selectedChannelId)
+  const source = channel?.sources[activeSourceIndex]
+  return channel && source
+    ? { channelId: channel.id, sourceId: source.id, sourceIndex: activeSourceIndex }
+    : undefined
+}
+
+function cancelPendingNetworkRecovery(): void {
+  if (networkRecoveryTimer !== undefined) window.clearTimeout(networkRecoveryTimer)
+  networkRecoveryTimer = undefined
+  networkRecovery.cancelPending()
+}
+
+function resetNetworkRecovery(): void {
+  if (networkRecoveryTimer !== undefined) window.clearTimeout(networkRecoveryTimer)
+  networkRecoveryTimer = undefined
+  networkRecovery.reset()
 }
 
 function updatePlaybackState(state: PlaybackState, message: string): void {
@@ -746,20 +855,27 @@ function updatePlaybackState(state: PlaybackState, message: string): void {
   elements.playerStatusText.textContent = message || (state === 'paused' ? '已暂停' : '')
   if (state === 'loading') updateChannelHealth('checking')
   else if (state === 'playing') {
+    resetNetworkRecovery()
     updateChannelHealth('playable')
     clearPlaybackDiagnostic()
   } else if (state === 'paused') updateChannelHealth('connected')
+  else if (state === 'waiting-network') updateChannelHealth('waiting-network')
   else if (state === 'error') updateChannelHealth('unavailable')
   else updateChannelHealth('not-checked')
   if (state === 'idle' || state === 'error') {
     elements.nowPlaying.hidden = true
+  } else if (state === 'waiting-network') {
+    elements.nowPlaying.hidden = false
   }
   if (state === 'idle') {
+    playbackAttemptGeneration += 1
+    resetNetworkRecovery()
     updateSourceButtons()
   }
 }
 
 async function togglePlayback(): Promise<void> {
+  if (await retryPendingNetworkPlayback('manual')) return
   const channel = getChannel(selectedChannelId) ?? filteredChannels[0]
   if (!channel) {
     showToast('当前筛选条件下没有可播放频道')
@@ -776,6 +892,7 @@ async function togglePlayback(): Promise<void> {
 }
 
 function stopPlayback(): void {
+  resetNetworkRecovery()
   player.stop()
   failedSources = new Set()
   elements.playerEmpty.hidden = false
@@ -1142,7 +1259,7 @@ function createOfficialBadge(label = '官方源'): HTMLElement {
   return badge
 }
 
-type ChannelHealthState = 'not-checked' | 'checking' | 'playable' | 'connected' | 'unavailable'
+type ChannelHealthState = 'not-checked' | 'checking' | 'playable' | 'connected' | 'waiting-network' | 'unavailable'
 
 function updateChannelHealth(state: ChannelHealthState): void {
   const labels: Record<ChannelHealthState, string> = {
@@ -1150,6 +1267,7 @@ function updateChannelHealth(state: ChannelHealthState): void {
     checking: '正在检测当前线路',
     playable: '当前线路可播放',
     connected: '当前线路已连接',
+    'waiting-network': '等待网络恢复',
     unavailable: '当前线路不可用'
   }
   elements.channelHealth.dataset.state = state

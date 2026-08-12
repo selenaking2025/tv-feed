@@ -14,6 +14,7 @@ export interface RegisterIpcOptions {
   catalog: CatalogCoordinator
   safety: SafetyCoordinator
   resources: RemoteResourceBroker
+  isNetworkOnline: () => boolean
   onRendererReady: (webContents: WebContents) => void
 }
 
@@ -82,6 +83,11 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
   ipcMain.on(IPC_CHANNELS.remoteCancel, (event, requestId: unknown) => {
     trust(event.senderFrame?.url ?? '')
     options.resources.cancel(event.sender.id, requestId)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.networkStatus, (event) => {
+    trust(event.senderFrame?.url ?? '')
+    return options.isNetworkOnline()
   })
 
   ipcMain.handle(IPC_CHANNELS.appVersion, (event) => {

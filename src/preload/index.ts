@@ -23,6 +23,7 @@ const bridge: TvFeedBridge = Object.freeze({
   fetchRemoteResource: (request: RemoteResourceRequest) => ipcRenderer.invoke(IPC_CHANNELS.remoteFetch, request),
   prepareRemoteResourceStream: (request: RemoteResourceRequest) => ipcRenderer.invoke(IPC_CHANNELS.remotePrepareStream, request),
   cancelRemoteResource: (requestId: string) => ipcRenderer.send(IPC_CHANNELS.remoteCancel, requestId),
+  isNetworkOnline: () => ipcRenderer.invoke(IPC_CHANNELS.networkStatus),
   getAppVersion: () => ipcRenderer.invoke(IPC_CHANNELS.appVersion),
   setPlayerFullscreen: (fullscreen: boolean) => ipcRenderer.invoke(IPC_CHANNELS.playerSetFullscreen, fullscreen),
   onPlayerFullscreenChange: (callback: (fullscreen: boolean) => void) => {

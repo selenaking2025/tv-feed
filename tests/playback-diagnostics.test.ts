@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { classifyPlaybackDiagnostic } from '../src/shared/playback-diagnostics.ts'
+import {
+  classifyPlaybackDiagnostic,
+  playbackDiagnosticInputForRemoteFailure
+} from '../src/shared/playback-diagnostics.ts'
 
 test('播放诊断识别安全网络失败类别', () => {
   assert.equal(classifyPlaybackDiagnostic('remote host example.test has no A/AAAA').code, 'dns-failure')
@@ -16,6 +19,18 @@ test('播放诊断区分访问限制、超时、媒体错误和源站离线', ()
   assert.equal(classifyPlaybackDiagnostic('bufferIncompatibleCodecsError').code, 'unsupported-media')
   assert.equal(classifyPlaybackDiagnostic('当前系统无法启用安全 HLS 加载器').code, 'unsupported-media')
   assert.equal(classifyPlaybackDiagnostic('HTTP Error 502 upstream unavailable').code, 'source-offline')
+})
+
+test('主进程固定失败类别把本机网络中断与单一源站 DNS 失败分开', () => {
+  const localNetwork = classifyPlaybackDiagnostic(playbackDiagnosticInputForRemoteFailure('network-unavailable'))
+  const sourceDns = classifyPlaybackDiagnostic(playbackDiagnosticInputForRemoteFailure('dns-failure'))
+
+  assert.equal(localNetwork.code, 'network-unavailable')
+  assert.equal(localNetwork.title, '网络连接暂时不可用')
+  assert.match(localNetwork.message, /Wi-Fi.*VPN.*系统代理/)
+  assert.equal(sourceDns.code, 'dns-failure')
+  assert.equal(sourceDns.title, '源站域名无法解析')
+  assert.match(sourceDns.message, /稍后重试或选择其他线路/)
 })
 
 test('播放诊断绝不回显完整 URL、主机名或令牌', () => {
