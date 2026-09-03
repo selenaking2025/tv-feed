@@ -33,6 +33,11 @@ jobs:
       - name: Install exact dependencies
         run: npm ci --registry=https://registry.npmjs.org
 
+      - name: Configure Electron's Linux sandbox helper
+        run: |
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+
       - name: Verify repository boundaries
         run: npm run verify:repository
 

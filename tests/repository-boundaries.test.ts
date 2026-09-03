@@ -115,7 +115,7 @@ test('基本密钥扫描识别常见凭据而不把普通配置误报为密钥',
 })
 
 test('CI 门禁要求最小权限、完整提交哈希和完整验证命令', () => {
-  const safeWorkflow = `permissions:\n  contents: read\nsteps:\n  - uses: actions/checkout@${'a'.repeat(40)}\n  - run: npm ci --registry=https://registry.npmjs.org\n  - run: npm run verify:repository\n  - run: npm run verify:public-release:static\n  - run: npm run typecheck\n  - run: npm test\n  - run: npm run build\n  - run: xvfb-run --auto-servernum npm run smoke\n  - run: sudo apt-get install --yes --no-install-recommends ffmpeg\n  - run: xvfb-run --auto-servernum npm run verify:hls:mpeg-ts\n`
+  const safeWorkflow = `permissions:\n  contents: read\nsteps:\n  - uses: actions/checkout@${'a'.repeat(40)}\n  - run: npm ci --registry=https://registry.npmjs.org\n  - run: sudo chown root:root node_modules/electron/dist/chrome-sandbox\n  - run: sudo chmod 4755 node_modules/electron/dist/chrome-sandbox\n  - run: npm run verify:repository\n  - run: npm run verify:public-release:static\n  - run: npm run typecheck\n  - run: npm test\n  - run: npm run build\n  - run: xvfb-run --auto-servernum npm run smoke\n  - run: sudo apt-get install --yes --no-install-recommends ffmpeg\n  - run: xvfb-run --auto-servernum npm run verify:hls:mpeg-ts\n`
   assert.deepEqual(findWorkflowViolations(safeWorkflow), [])
   assert.match(findWorkflowViolations(safeWorkflow.replace(`@${'a'.repeat(40)}`, '@v6')).join('\n'), /完整提交哈希/)
 })

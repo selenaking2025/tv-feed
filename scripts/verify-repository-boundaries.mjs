@@ -250,6 +250,8 @@ export function findWorkflowViolations(workflowText) {
   }
   for (const requiredCommand of [
     'npm ci --registry=https://registry.npmjs.org',
+    'sudo chown root:root node_modules/electron/dist/chrome-sandbox',
+    'sudo chmod 4755 node_modules/electron/dist/chrome-sandbox',
     'npm run verify:repository',
     'npm run verify:public-release:static',
     'npm run typecheck',
