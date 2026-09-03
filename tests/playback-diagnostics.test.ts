@@ -31,6 +31,11 @@ test('主进程固定失败类别把本机网络中断与单一源站 DNS 失败
   assert.equal(sourceDns.code, 'dns-failure')
   assert.equal(sourceDns.title, '源站域名无法解析')
   assert.match(sourceDns.message, /稍后重试或选择其他线路/)
+
+  const fakeIpDns = classifyPlaybackDiagnostic(playbackDiagnosticInputForRemoteFailure('fake-ip-dns'))
+  assert.equal(fakeIpDns.code, 'fake-ip-dns')
+  assert.equal(fakeIpDns.title, '检测到 fake-IP DNS')
+  assert.match(fakeIpDns.message, /198\.18\.0\.0\/15/)
 })
 
 test('播放诊断绝不回显完整 URL、主机名或令牌', () => {

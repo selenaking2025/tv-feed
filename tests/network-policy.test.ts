@@ -6,19 +6,25 @@ import test from 'node:test'
 import { gzipSync } from 'node:zlib'
 import {
   createPinnedLookup,
+  fakeIpDnsCompatibilityEnabled,
   fetchBoundedHttps,
   formatConnectAuthority,
   gunzipBounded,
   parseSystemProxyRules,
   readBoundedBody,
   SecureConnectionPool,
+  resolvePublicTarget,
   streamBoundedHttps,
   toSecureNetworkError,
   type AddressResolver,
   type PinnedRequestExecutor,
   type RawHttpsResponse
 } from '../src/main/secure-network.ts'
-import { isPublicIpAddress, normalizeRemoteHttpsUrl } from '../src/shared/remote-url-policy.ts'
+import {
+  isFakeIpDnsAddress,
+  isPublicIpAddress,
+  normalizeRemoteHttpsUrl
+} from '../src/shared/remote-url-policy.ts'
 
 const FETCH_OPTIONS = {
   accept: 'application/octet-stream',
@@ -88,8 +94,54 @@ test('公网地址判定拒绝 IPv4 映射 IPv6、链路本地和保留地址', 
   assert.equal(isPublicIpAddress('fe90::1'), false)
   assert.equal(isPublicIpAddress('fc00::1'), false)
   assert.equal(isPublicIpAddress('2001:db8::1'), false)
+  assert.equal(isFakeIpDnsAddress('198.18.0.0'), true)
+  assert.equal(isFakeIpDnsAddress('198.19.255.255'), true)
+  assert.equal(isFakeIpDnsAddress('198.20.0.0'), false)
   assert.equal(normalizeRemoteHttpsUrl('https://2130706433/private'), '')
   assert.equal(normalizeRemoteHttpsUrl('https://0x7f000001/private'), '')
+})
+
+test('fake-IP DNS 默认给出明确类别，只有显式开关且全部结果为虚拟地址时才兼容', async () => {
+  const resolver: AddressResolver = async () => [
+    { address: '198.18.1.10', family: 4 },
+    { address: '198.19.2.20', family: 4 }
+  ]
+
+  await assert.rejects(
+    resolvePublicTarget('https://media.example.com/live.m3u8', resolver),
+    (error: unknown) => error instanceof Error && 'code' in error && error.code === 'fake-ip-dns'
+  )
+  const accepted = await resolvePublicTarget('https://media.example.com/live.m3u8', resolver, {
+    trustFakeIpDns: true
+  })
+  assert.deepEqual(accepted.addresses, [
+    { address: '198.18.1.10', family: 4 },
+    { address: '198.19.2.20', family: 4 }
+  ])
+  assert.equal(fakeIpDnsCompatibilityEnabled({}), false)
+  assert.equal(fakeIpDnsCompatibilityEnabled({ TVFEED_TRUST_FAKE_IP_DNS: '0' }), false)
+  assert.equal(fakeIpDnsCompatibilityEnabled({ TVFEED_TRUST_FAKE_IP_DNS: '1' }), true)
+})
+
+test('fake-IP 兼容模式不接受 IP 字面量、混合公网或其他私网结果', async () => {
+  await assert.rejects(
+    resolvePublicTarget('https://198.18.1.10/live.m3u8', undefined, { trustFakeIpDns: true }),
+    /公网 HTTPS URL/
+  )
+  await assert.rejects(
+    resolvePublicTarget('https://media.example.com/live.m3u8', async () => [
+      { address: '198.18.1.10', family: 4 },
+      { address: '93.184.216.34', family: 4 }
+    ], { trustFakeIpDns: true }),
+    /非公网地址/
+  )
+  await assert.rejects(
+    resolvePublicTarget('https://media.example.com/live.m3u8', async () => [
+      { address: '198.18.1.10', family: 4 },
+      { address: '10.0.0.7', family: 4 }
+    ], { trustFakeIpDns: true }),
+    /非公网地址/
+  )
 })
 
 test('域名任一 A/AAAA 结果为私网时，请求在网络连接前失败', async () => {

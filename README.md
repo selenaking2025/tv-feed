@@ -38,9 +38,21 @@ TV Feed 与 iptv-org、电视台、频道及内容权利人没有隶属、赞助
 现行权威边界、目录并发规则、家庭安全恢复流程、缓存 V2 迁移和五阶段优化记录见 [架构文档](docs/ARCHITECTURE.md)。
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
+
+项目固定使用 Electron 43.3.0、electron-vite 5.0.0 与 Vite 7.3.6。安装结束和每次开发启动前都会校验 Electron 可执行文件；若 npm 包存在但二进制下载缺失，会重新执行 Electron 自带的官方安装脚本。若仍失败，请检查到 GitHub Releases 的网络、代理或 Electron 镜像配置，不要从未知地址复制可执行文件。
+
+`npm run dev` 会自动输出经过脱敏的页面加载、preload、renderer 崩溃和 warning/error 诊断。日志只保留事件类别，不输出完整 URL、本机路径、查询令牌或原始 `play()` 拒绝正文。使用 production build 调试时，可显式设置 `TVFEED_DIAGNOSTICS=1`。
+
+默认安全策略仍拒绝 `198.18.0.0/15` 等保留网段。如果确认本机使用 Surge、Clash、sing-box 一类 fake-IP DNS 网关，可按次显式启用兼容模式：
+
+```bash
+TVFEED_TRUST_FAKE_IP_DNS=1 npm run dev
+```
+
+该开关只接受“域名的全部解析结果都位于 `198.18.0.0/15`”的情况，默认关闭；IP 字面量、混合公网/私网结果和其他保留地址仍会被拒绝。它改变 DNS 固定连接的安全假设，只应在理解并信任当前本机网关时使用。
 
 ## 验证
 
@@ -49,10 +61,11 @@ npm run typecheck
 npm test
 npm run build
 npm run smoke
+npm run verify:hls:mpeg-ts
 npm run verify:public-release
 ```
 
-私有仓库的 GitHub Actions 会在每次推送到 `main` 和每个 Pull Request 上使用官方 npm registry 执行全新 `npm ci`、仓库边界检查、类型检查、单元测试和生产构建。仓库边界检查会拒绝频道缓存、M3U、安装包、未批准图片、常见凭据、非官方依赖下载地址，以及渲染进程直接联网等回归。
+私有仓库的 GitHub Actions 会在每次推送到 `main` 和每个 Pull Request 上使用官方 npm registry 执行全新 `npm ci`、仓库边界检查、类型检查、单元测试和生产构建。构建后还会在虚拟显示器中真正启动 Electron、验证 renderer，并运行离线 MPEG-TS 交错 A/B；因此 Electron npm 包存在但二进制缺失时不会被“只构建”掩盖。仓库边界检查会拒绝频道缓存、M3U、安装包、未批准图片、常见凭据、非官方依赖下载地址，以及渲染进程直接联网等回归。
 
 `npm run smoke` 会使用内置虚构样例目录真实启动 Electron、检查主要界面状态，并将截图写入系统临时目录。样例线路使用保留的 `.invalid` 域名，不代表任何真实频道或直播源。
 

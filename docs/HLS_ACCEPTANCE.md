@@ -19,6 +19,8 @@ TV Feed 把协议示例与真实电视台分成两组验证，避免把“某条
 - AES-128 密钥沿同一安全网络通道读取。
 - DRM 或非 AES-128 内容保护只识别并拒绝，不尝试绕过。
 - 实际 Electron 播放另由隔离用户数据目录的 smoke 验证。
+- 确定性 MPEG-TS 组不访问直播源：运行时用 FFmpeg 的 `testsrc2` 与正弦波在系统临时目录生成短 H.264/AAC TS 直播清单，退出后删除。
+- MPEG-TS 组按“生产 progressive / 库默认 / 库默认 / 生产 progressive / 库默认 / 生产 progressive”交错运行。每轮记录分片数、缓冲时长、媒体推进和解码帧；两组各三轮都必须通过。一旦两组出现分化，门禁会失败并要求重新评估，不能直接把某个配置变化写成已确认修复。
 
 ## 本机执行
 
@@ -27,5 +29,13 @@ TV Feed 把协议示例与真实电视台分成两组验证，避免把“某条
 ```sh
 npm run verify:hls:acceptance -- --catalog "/path/to/local/catalog-v1.json" --report "/tmp/tv-feed-hls-acceptance.json"
 ```
+
+不依赖网络的 MPEG-TS Electron A/B：
+
+```sh
+npm run verify:hls:mpeg-ts
+```
+
+该命令需要本机安装 `ffmpeg`，但不会保存或提交生成的媒体片段。当前确定性测试尚未复现特定第三方直播源报告的 progressive 停滞，因此生产播放器保留原有覆盖；库默认模式只作为交错对照。在获得可重复分化证据前，不把删除覆盖视为修复。
 
 直播源会变化、停播或受地域限制。一次通过只证明测试当时的安全通道与该 HLS 结构兼容，不证明后续持续可用，也不构成内容授权结论。

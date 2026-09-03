@@ -19,6 +19,7 @@ export interface RemoteResourceResponse {
 export const REMOTE_RESOURCE_FAILURE_CODES = Object.freeze([
   'network-unavailable',
   'dns-failure',
+  'fake-ip-dns',
   'unsafe-target',
   'redirect-rejected',
   'response-too-large',

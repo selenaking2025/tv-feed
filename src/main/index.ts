@@ -12,6 +12,11 @@ import { createCatalogService } from './catalog-service.ts'
 import { registerIpcHandlers } from './register-ipc.ts'
 import { RemoteResourceBroker } from './remote-resource-broker.ts'
 import { readRuntimeConfig } from './runtime-config.ts'
+import {
+  attachRuntimeDiagnostics,
+  reportRuntimeLoadError,
+  sanitizeRuntimeDiagnostic
+} from './runtime-diagnostics.ts'
 import { SafetyCoordinator } from './safety-coordinator.ts'
 import { FileSafetyStateStore } from './safety-state-store.ts'
 import { configureSystemProxyResolver, destroySecureConnections } from './secure-network.ts'
@@ -66,7 +71,7 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow(resources)
   })
 }).catch((error) => {
-  process.stderr.write(`TVFEED_STARTUP_ERROR ${sanitizeDiagnostic(error instanceof Error ? error.message : String(error))}\n`)
+  process.stderr.write(`TVFEED_STARTUP_ERROR ${sanitizeRuntimeDiagnostic(error instanceof Error ? error.message : String(error))}\n`)
   app.quit()
 })
 
@@ -122,13 +127,14 @@ function createMainWindow(resources: RemoteResourceBroker): void {
     if (mainWindow === createdWindow) mainWindow = null
   })
 
-  if (runtime.smoke.enabled) attachSmokeDiagnostics(createdWindow, rendererId, resources)
+  if (runtime.diagnostics.enabled) attachRuntimeDiagnostics(createdWindow, rendererId, resources)
+  if (runtime.smoke.enabled) attachSmokeDeadline(createdWindow)
 
   const target = runtime.rendererUrl || `${APP_PROTOCOL.scheme}://${APP_PROTOCOL.host}/`
-  void createdWindow.loadURL(target).catch(reportLoadError)
+  void createdWindow.loadURL(target).catch((error: unknown) => reportRuntimeLoadError(error, runtime.diagnostics.enabled))
 }
 
-function attachSmokeDiagnostics(window: BrowserWindow, rendererId: number, resources: RemoteResourceBroker): void {
+function attachSmokeDeadline(window: BrowserWindow): void {
   window.webContents.once('did-finish-load', () => {
     const delay = runtime.smoke.liveCatalog && !runtime.smoke.forceNetworkFailure ? 370_000 : 2_500
     setTimeout(() => {
@@ -137,28 +143,6 @@ function attachSmokeDiagnostics(window: BrowserWindow, rendererId: number, resou
       void runConfiguredSmokeInspection(window.webContents)
     }, delay)
   })
-  window.webContents.on('did-fail-load', (_event, code, description, validatedUrl) => {
-    process.stderr.write(`TVFEED_DIAGNOSTIC load-failed ${code} ${sanitizeDiagnostic(description)} ${sanitizeDiagnostic(validatedUrl)}\n`)
-  })
-  window.webContents.on('preload-error', (_event, path, error) => {
-    process.stderr.write(`TVFEED_DIAGNOSTIC preload-error ${sanitizeDiagnostic(path)} ${sanitizeDiagnostic(error.message)}\n`)
-  })
-  window.webContents.on('render-process-gone', (_event, details) => {
-    resources.abortSender(rendererId)
-    process.stderr.write(`TVFEED_DIAGNOSTIC renderer-gone ${details.reason} ${details.exitCode}\n`)
-  })
-  window.webContents.on('console-message', (details) => {
-    if (details.level === 'warning' || details.level === 'error') {
-      process.stderr.write(
-        `TVFEED_DIAGNOSTIC console ${sanitizeDiagnostic(details.message)} ${sanitizeDiagnostic(details.sourceId)}:${details.lineNumber}\n`
-      )
-    }
-  })
-}
-
-function reportLoadError(error: unknown): void {
-  if (!runtime.smoke.enabled) return
-  process.stderr.write(`TVFEED_DIAGNOSTIC load-rejected ${sanitizeDiagnostic(error instanceof Error ? error.message : String(error))}\n`)
 }
 
 async function runConfiguredSmokeInspection(webContents: Electron.WebContents): Promise<void> {
@@ -176,8 +160,4 @@ async function runConfiguredSmokeInspection(webContents: Electron.WebContents): 
     process.exitCode = 1
     setTimeout(() => app.quit(), 100)
   }
-}
-
-function sanitizeDiagnostic(value: string): string {
-  return value.replace(/https:\/\/[^\s)]+/gi, '[remote URL]')
 }

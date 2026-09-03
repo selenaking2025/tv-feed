@@ -155,6 +155,7 @@ export interface CatalogSyncProgress extends CatalogSyncProgressUpdate {
 export type CatalogFailureCode =
   | 'proxy'
   | 'dns'
+  | 'fake-ip-dns'
   | 'timeout'
   | 'http'
   | 'security'

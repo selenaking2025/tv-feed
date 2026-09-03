@@ -28,6 +28,10 @@ export function toCatalogLoadFailure(error: unknown): CatalogLoadFailure {
   const copy: Record<CatalogFailureCode, { title: string; message: string }> = {
     proxy: { title: '代理连接失败', message: '无法通过当前代理连接 iptv-org，请检查 macOS、PAC、VPN 或本机代理状态。' },
     dns: { title: '域名解析失败', message: '无法解析 iptv-org 的公网地址，请检查 DNS 或网络连接。' },
+    'fake-ip-dns': {
+      title: '检测到 fake-IP DNS',
+      message: '当前 DNS 把公网域名映射到 198.18.0.0/15。请切换 DNS 模式，或在确认使用 Surge、Clash、sing-box 等 fake-IP 网关后显式开启兼容模式。'
+    },
     timeout: { title: '连接 iptv-org 超时', message: '频道目录请求超过时间上限，可以稍后重新尝试。' },
     http: { title: 'iptv-org 暂时不可用', message: '上游服务返回临时错误，可以稍后重新尝试。' },
     security: { title: '安全检查未通过', message: '远程响应没有通过公网地址、TLS、重定向或大小限制检查。' },

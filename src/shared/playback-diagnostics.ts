@@ -22,6 +22,11 @@ const DIAGNOSTICS: Readonly<Record<PlaybackDiagnosticCode, PlaybackDiagnostic>> 
     title: '源站域名无法解析',
     message: '这条线路的源站域名当前不可用，请稍后重试或选择其他线路。'
   }),
+  'fake-ip-dns': Object.freeze({
+    code: 'fake-ip-dns',
+    title: '检测到 fake-IP DNS',
+    message: '当前 DNS 使用 198.18.0.0/15 虚拟地址；请切换 DNS 模式，或在确认网关配置后显式开启兼容模式。'
+  }),
   'unsafe-target': Object.freeze({
     code: 'unsafe-target',
     title: '目标未通过安全校验',

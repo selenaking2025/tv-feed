@@ -28,6 +28,8 @@ const RESTRICTED_IPV4_RANGES: Ipv4Range[] = [
   ipv4Range('240.0.0.0', 4)
 ]
 
+const FAKE_IP_DNS_IPV4_RANGE = ipv4Range('198.18.0.0', 15)
+
 const RESTRICTED_IPV6_RANGES: Ipv6Range[] = [
   ipv6Range('2001::', 32),
   ipv6Range('2001:2::', 48),
@@ -89,6 +91,11 @@ export function isPublicIpAddress(address: string): boolean {
   if (ipv4 !== undefined) return isPublicIpv4(ipv4)
   const ipv6 = parseIpv6(host)
   return ipv6 !== undefined && isPublicIpv6(ipv6)
+}
+
+export function isFakeIpDnsAddress(address: string): boolean {
+  const ipv4 = parseIpv4(stripIpv6Brackets(address).toLocaleLowerCase())
+  return ipv4 !== undefined && matchesIpv4Range(ipv4, FAKE_IP_DNS_IPV4_RANGE)
 }
 
 function isPublicIpv4(address: number): boolean {

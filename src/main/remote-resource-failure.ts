@@ -14,6 +14,8 @@ export function toRemoteResourceFailure(error: unknown, networkOnline: boolean):
       return networkOnline && !networkError.retryable
         ? failure('dns-failure', false)
         : failure('network-unavailable', true)
+    case 'fake-ip-dns':
+      return failure('fake-ip-dns', false)
     case 'proxy':
       return failure('network-unavailable', networkError.retryable)
     case 'timeout':

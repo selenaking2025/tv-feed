@@ -4,7 +4,11 @@ import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { isIP, type LookupFunction } from 'node:net'
 import { checkServerIdentity, connect as tlsConnect, type TLSSocket } from 'node:tls'
 import { gunzip } from 'node:zlib'
-import { isPublicIpAddress, normalizeRemoteHttpsUrl } from '../shared/remote-url-policy.ts'
+import {
+  isFakeIpDnsAddress,
+  isPublicIpAddress,
+  normalizeRemoteHttpsUrl
+} from '../shared/remote-url-policy.ts'
 
 export interface ResolvedAddress {
   address: string
@@ -71,9 +75,10 @@ export interface SecureStreamResult {
 export interface SecureFetchDependencies {
   resolve?: AddressResolver
   request?: PinnedRequestExecutor
+  trustFakeIpDns?: boolean
 }
 
-export type SecureNetworkFailureCode = 'proxy' | 'dns' | 'timeout' | 'http' | 'security' | 'network'
+export type SecureNetworkFailureCode = 'proxy' | 'dns' | 'fake-ip-dns' | 'timeout' | 'http' | 'security' | 'network'
 
 export class SecureNetworkError extends Error {
   readonly code: SecureNetworkFailureCode
@@ -205,6 +210,7 @@ export async function fetchBoundedHttps(
   validateFetchOptions(options)
   const resolve = dependencies.resolve ?? resolveSystemAddresses
   const request = dependencies.request ?? openPinnedHttpsRequest
+  const trustFakeIpDns = dependencies.trustFakeIpDns ?? fakeIpDnsCompatibilityEnabled()
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS
   const deadline = createDeadline(options.timeoutMs, options.signal)
   let currentUrl = inputUrl
@@ -212,7 +218,7 @@ export async function fetchBoundedHttps(
   try {
     for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
       throwIfAborted(deadline.signal)
-      const target = await abortable(resolvePublicTarget(currentUrl, resolve), deadline.signal)
+      const target = await abortable(resolvePublicTarget(currentUrl, resolve, { trustFakeIpDns }), deadline.signal)
       throwIfAborted(deadline.signal)
       const headers: Record<string, string> = {
         Accept: options.accept,
@@ -298,6 +304,7 @@ export async function streamBoundedHttps(
   if (options.allowCompression === true) throw new Error('安全流式响应不支持压缩正文')
   const resolve = dependencies.resolve ?? resolveSystemAddresses
   const request = dependencies.request ?? openPinnedHttpsRequest
+  const trustFakeIpDns = dependencies.trustFakeIpDns ?? fakeIpDnsCompatibilityEnabled()
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS
   const deadline = createDeadline(options.timeoutMs, options.signal)
   let currentUrl = inputUrl
@@ -306,7 +313,7 @@ export async function streamBoundedHttps(
   try {
     for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
       throwIfAborted(deadline.signal)
-      const target = await abortable(resolvePublicTarget(currentUrl, resolve), deadline.signal)
+      const target = await abortable(resolvePublicTarget(currentUrl, resolve, { trustFakeIpDns }), deadline.signal)
       throwIfAborted(deadline.signal)
       const headers: Record<string, string> = {
         Accept: options.accept,
@@ -385,7 +392,8 @@ export async function streamBoundedHttps(
 
 export async function resolvePublicTarget(
   inputUrl: string,
-  resolver: AddressResolver = resolveSystemAddresses
+  resolver: AddressResolver = resolveSystemAddresses,
+  options: Readonly<{ trustFakeIpDns?: boolean }> = {}
 ): Promise<ResolvedRemoteTarget> {
   const normalized = normalizeRemoteHttpsUrl(inputUrl)
   if (!normalized) throw new Error('远程地址必须是无凭据的公网 HTTPS URL')
@@ -398,11 +406,27 @@ export async function resolvePublicTarget(
     : await resolver(hostname)
   if (resolved.length === 0) throw new Error(`远程主机 ${hostname} 没有可用的 A/AAAA 地址`)
 
+  const fakeIpDnsOnly = literalFamily === 0 && resolved.every((entry) => (
+    entry.family === 4 && isIP(entry.address) === 4 && isFakeIpDnsAddress(entry.address)
+  ))
+  if (fakeIpDnsOnly && options.trustFakeIpDns !== true) {
+    throw new SecureNetworkError(
+      'fake-ip-dns',
+      '检测到 198.18.0.0/15 fake-IP DNS；兼容模式默认关闭',
+      false
+    )
+  }
+
   const addresses: ResolvedAddress[] = []
   const seen = new Set<string>()
   for (const entry of resolved) {
     const family = isIP(entry.address)
-    if ((family !== 4 && family !== 6) || family !== entry.family || !isPublicIpAddress(entry.address)) {
+    const acceptedFakeIp = fakeIpDnsOnly && options.trustFakeIpDns === true && isFakeIpDnsAddress(entry.address)
+    if (
+      (family !== 4 && family !== 6) ||
+      family !== entry.family ||
+      (!isPublicIpAddress(entry.address) && !acceptedFakeIp)
+    ) {
       throw new Error(`远程主机 ${hostname} 解析到了非公网地址`)
     }
     const key = `${family}:${entry.address}`
@@ -413,6 +437,10 @@ export async function resolvePublicTarget(
   }
   if (addresses.length === 0) throw new Error(`远程主机 ${hostname} 没有可用的公网地址`)
   return { url, hostname, addresses }
+}
+
+export function fakeIpDnsCompatibilityEnabled(environment: NodeJS.ProcessEnv = process.env): boolean {
+  return environment.TVFEED_TRUST_FAKE_IP_DNS === '1'
 }
 
 export function createPinnedLookup(hostname: string, addresses: readonly ResolvedAddress[]): LookupFunction {

@@ -254,7 +254,10 @@ export function findWorkflowViolations(workflowText) {
     'npm run verify:public-release:static',
     'npm run typecheck',
     'npm test',
-    'npm run build'
+    'npm run build',
+    'xvfb-run --auto-servernum npm run smoke',
+    'sudo apt-get install --yes --no-install-recommends ffmpeg',
+    'xvfb-run --auto-servernum npm run verify:hls:mpeg-ts'
   ]) {
     if (!workflowText.includes(requiredCommand)) {
       violations.push(`.github/workflows/ci.yml: 缺少 ${requiredCommand}`)

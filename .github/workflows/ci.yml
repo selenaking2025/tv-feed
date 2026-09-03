@@ -47,3 +47,14 @@ jobs:
 
       - name: Build Electron application
         run: npm run build
+
+      - name: Launch Electron and verify the renderer
+        run: xvfb-run --auto-servernum npm run smoke
+
+      - name: Install FFmpeg for the generated MPEG-TS fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+
+      - name: Verify deterministic MPEG-TS playback A/B
+        run: xvfb-run --auto-servernum npm run verify:hls:mpeg-ts

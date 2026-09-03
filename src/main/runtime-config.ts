@@ -1,5 +1,8 @@
 export interface RuntimeConfig {
   rendererUrl: string
+  diagnostics: {
+    enabled: boolean
+  }
   smoke: {
     enabled: boolean
     driverPath: string
@@ -22,8 +25,12 @@ export interface RuntimeConfig {
 export function readRuntimeConfig(environment: NodeJS.ProcessEnv = process.env): RuntimeConfig {
   const outputPath = environment.TVFEED_SMOKE_OUTPUT ?? ''
   const enabled = outputPath.length > 0
+  const rendererUrl = environment.ELECTRON_RENDERER_URL ?? ''
   return Object.freeze({
-    rendererUrl: environment.ELECTRON_RENDERER_URL ?? '',
+    rendererUrl,
+    diagnostics: Object.freeze({
+      enabled: enabled || rendererUrl.length > 0 || environment.TVFEED_DIAGNOSTICS === '1'
+    }),
     smoke: Object.freeze({
       enabled,
       driverPath: enabled ? environment.TVFEED_SMOKE_DRIVER_PATH ?? '' : '',

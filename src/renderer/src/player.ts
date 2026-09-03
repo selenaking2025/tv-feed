@@ -4,6 +4,7 @@ import {
   classifyPlaybackDiagnostic,
   type PlaybackDiagnostic
 } from '../../shared/playback-diagnostics.ts'
+import { classifyPlaybackStartRejection } from '../../shared/playback-start-diagnostics.ts'
 import {
   bufferedAheadSeconds,
   mediaAdvanceDelta,
@@ -11,7 +12,7 @@ import {
   type PlaybackMetricsSnapshot
 } from '../../shared/playback-metrics.ts'
 import { decideStallRecovery } from '../../shared/playback-stability.ts'
-import { SecureHlsLoader } from './secure-hls-loader.ts'
+import { createSecureHls } from './hls-engine.ts'
 
 const AUTOPLAY_BUFFER_TARGET_SECONDS = 5
 const AUTOPLAY_BUFFER_MAX_WAIT_MS = 8_000
@@ -109,43 +110,7 @@ export class StreamPlayer {
     this.callbacks.onState('loading', '正在连接直播线路…')
 
     if (Hls.isSupported()) {
-      const hls = new Hls({
-        loader: SecureHlsLoader,
-        enableWorker: true,
-        lowLatencyMode: false,
-        backBufferLength: 20,
-        maxBufferLength: 60,
-        liveSyncDurationCount: 5,
-        liveMaxLatencyDurationCount: 10,
-        // Prefer steady decoding over racing back to the live edge after a
-        // short interruption. Persistent lag is still bounded by the live
-        // latency window and handled by the stall watchdog.
-        maxLiveSyncPlaybackRate: 1,
-        capLevelToPlayerSize: true,
-        capLevelOnFPSDrop: true,
-        startLevel: 0,
-        abrBandWidthFactor: 0.75,
-        abrBandWidthUpFactor: 0.55,
-        abrMaxWithRealBitrate: true,
-        abrEwmaFastLive: 5,
-        abrEwmaSlowLive: 15,
-        abrEwmaFastVoD: 5,
-        abrEwmaSlowVoD: 15,
-        maxStarvationDelay: 2,
-        maxLoadingDelay: 2,
-        fpsDroppedMonitoringPeriod: 3_000,
-        // The continuity gate allows at most 2% dropped frames. Cap the
-        // current level as soon as a monitoring window reaches that limit,
-        // instead of waiting for hls.js's much looser default.
-        fpsDroppedMonitoringThreshold: 0.02,
-        manifestLoadingTimeOut: 15_000,
-        fragLoadingTimeOut: 20_000,
-        levelLoadingTimeOut: 15_000
-      })
-      // hls.js disables progressive mode automatically for unknown custom
-      // loaders. SecureHlsLoader implements the same chunked callback contract,
-      // so opt back in only after the instance has finished configuration.
-      hls.config.progressive = true
+      const hls = createSecureHls()
       this.hls = hls
       const generation = this.loadGeneration
       this.hls.attachMedia(this.video)
@@ -177,8 +142,8 @@ export class StreamPlayer {
     if (this.video.paused) {
       try {
         await this.video.play()
-      } catch {
-        this.callbacks.onState('paused', '系统阻止了自动播放，请再次点击播放')
+      } catch (error) {
+        this.reportPlayRejection(error, 'manual')
       }
     } else {
       this.video.pause()
@@ -227,9 +192,15 @@ export class StreamPlayer {
     if (generation !== this.loadGeneration || !this.shouldAutoplay) return
     try {
       await this.video.play()
-    } catch {
-      this.callbacks.onState('paused', '点击播放按钮继续')
+    } catch (error) {
+      this.reportPlayRejection(error, 'deferred')
     }
+  }
+
+  private reportPlayRejection(error: unknown, phase: 'manual' | 'deferred'): void {
+    const rejection = classifyPlaybackStartRejection(error)
+    console.warn(`TVFEED_PLAY_REJECTED phase=${phase} code=${rejection.code}`)
+    this.callbacks.onState('paused', rejection.message)
   }
 
   private fail(...inputs: readonly unknown[]): void {

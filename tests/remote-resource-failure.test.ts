@@ -38,6 +38,16 @@ test('确定性源站 DNS、HTTP 和内容错误保留各自固定类别', () =>
   )
 })
 
+test('fake-IP DNS 使用独立固定类别且不回显地址', () => {
+  const result = toRemoteResourceFailure(
+    new SecureNetworkError('fake-ip-dns', '检测到 198.18.1.10 和 private.example', false),
+    true
+  )
+
+  assert.deepEqual(result, { code: 'fake-ip-dns', retryable: false })
+  assert.doesNotMatch(JSON.stringify(result), /198\.18|private\.example/i)
+})
+
 test('源站拒绝或重置连接不会被误判成本机断网', () => {
   const refused = Object.assign(new Error('connect refused source.example'), { code: 'ECONNREFUSED' })
   const reset = Object.assign(new Error('socket reset source.example'), { code: 'ECONNRESET' })
