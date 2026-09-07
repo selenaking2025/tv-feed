@@ -158,12 +158,15 @@ if (checks.rows < 8 || checks.visibleChannelNames < 8 || checks.sourceButtons < 
 if (!checks.favoriteToggleWorks || !checks.searchFilterWorks) {
   throw new Error(`核心交互未通过：${JSON.stringify(checks)}`)
 }
-if (!checks.controlsBelowPlayer || !checks.sidebarCollapseWorks || !checks.sidebarRestoreWorks) {
+if (!checks.controlsBelowPlayer || !checks.sidebarCollapseWorks || !checks.sidebarRestoreWorks ||
+  (checks.sidebarMode === 'drawer' && !checks.drawerDismissWorks)) {
   throw new Error(`播放器布局或侧栏折叠未通过：${JSON.stringify({
     controlsBelowPlayer: checks.controlsBelowPlayer,
     sidebarCollapseWorks: checks.sidebarCollapseWorks,
     sidebarRestoreWorks: checks.sidebarRestoreWorks,
-    playerExpansion: checks.playerExpansion
+    playerExpansion: checks.playerExpansion,
+    sidebarMode: checks.sidebarMode,
+    drawerDismissWorks: checks.drawerDismissWorks
   })}`)
 }
 if (!checks.fullscreenCheck?.passed) {

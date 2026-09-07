@@ -85,6 +85,10 @@ export function validateRemoteResourceRequest(value: unknown): RemoteResourceReq
   if (candidate.kind !== 'hls-playlist' && candidate.kind !== 'hls-json' && candidate.kind !== 'hls-binary' && candidate.kind !== 'logo') {
     throw new Error('远程资源类型无效')
   }
+  if (candidate.playbackSessionId !== undefined &&
+    (typeof candidate.playbackSessionId !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(candidate.playbackSessionId))) {
+    throw new Error('播放会话标识无效')
+  }
 
   const hasRangeStart = candidate.rangeStart !== undefined
   const hasRangeEnd = candidate.rangeEnd !== undefined
@@ -104,6 +108,7 @@ export function validateRemoteResourceRequest(value: unknown): RemoteResourceReq
     requestId: candidate.requestId,
     url: candidate.url,
     kind: candidate.kind,
+    ...(typeof candidate.playbackSessionId === 'string' ? { playbackSessionId: candidate.playbackSessionId } : {}),
     ...(hasRangeStart && hasRangeEnd
       ? { rangeStart: Number(candidate.rangeStart), rangeEnd: Number(candidate.rangeEnd) }
       : {})

@@ -181,7 +181,7 @@ export function findArchitectureBoundaryViolations(entries) {
     violations.push('src/main/smoke-driver.ts: 完整冒烟驱动不得进入生产源码')
   }
 
-  const ipcLiteral = /['"](?:catalog|safety|remote-resource|network|app|player-fullscreen|renderer):[A-Za-z0-9:-]+['"]/g
+  const ipcLiteral = /['"](?:catalog|safety|remote-resource|playback|network|app|player-fullscreen|renderer):[A-Za-z0-9:-]+['"]/g
   for (const [rawFile, text] of entries) {
     const file = normalizePath(rawFile)
     if (!file.startsWith('src/')) continue
@@ -202,6 +202,10 @@ export function findArchitectureBoundaryViolations(entries) {
     }
     if (file.startsWith('src/renderer/') && /from\s+['"][^'"]*catalog\.ts['"]/.test(text)) {
       violations.push(`${file}: renderer 不得直接执行目录安全投影`)
+    }
+    if (file.startsWith('src/renderer/') && file !== 'src/renderer/src/viewing-state.ts' &&
+      /tvfeed:(?:favorites|recents|last-channel|source-health):v1/.test(text)) {
+      violations.push(`${file}: 观看数据键只能由 viewing-state.ts 管理`)
     }
     if (file !== 'src/main/catalog-service.ts' && /new\s+CatalogCacheRepository\s*\(/.test(text)) {
       violations.push(`${file}: 目录缓存仓库只能由 catalog-service.ts 组装`)
@@ -256,10 +260,14 @@ export function findWorkflowViolations(workflowText) {
     'npm run verify:public-release:static',
     'npm run typecheck',
     'npm test',
-    'npm run build',
+    'npm run build:app',
     'xvfb-run --auto-servernum npm run smoke',
     'sudo apt-get install --yes --no-install-recommends ffmpeg',
-    'xvfb-run --auto-servernum npm run verify:hls:mpeg-ts'
+    'xvfb-run --auto-servernum npm run verify:hls:mpeg-ts',
+    'xvfb-run --auto-servernum npm run verify:regressions',
+    'runs-on: macos-15',
+    'npx --no-install electron-builder --mac dir --arm64 --publish never',
+    "TVFEED_EXPECT_PACKAGED: '1'"
   ]) {
     if (!workflowText.includes(requiredCommand)) {
       violations.push(`.github/workflows/ci.yml: 缺少 ${requiredCommand}`)

@@ -4,6 +4,8 @@ import {
   type RemoteResourceKind,
   type RemoteResourceRequest
 } from '../shared/remote-resource-contracts.ts'
+import { randomBytes } from 'node:crypto'
+import type { PlaybackSession } from '../shared/playback-contracts.ts'
 import { APP_PROTOCOL } from '../shared/ipc-contract.ts'
 import { OneTimeTicketRegistry } from './one-time-ticket-registry.ts'
 import { toRemoteResourceFailure } from './remote-resource-failure.ts'
@@ -45,6 +47,7 @@ export class RemoteResourceBroker {
   private readonly fetchResource: typeof fetchRemoteResource
   private readonly streamResource: typeof streamRemoteResource
   private readonly active = new Map<string, ActiveRemoteFetch>()
+  private readonly playbackSessions = new Map<number, PlaybackSession>()
   private readonly tickets = new OneTimeTicketRegistry<RemoteStreamTicketEntry>(
     REMOTE_STREAM_TICKET_TTL_MS,
     MAX_REMOTE_STREAM_TICKETS
@@ -64,15 +67,42 @@ export class RemoteResourceBroker {
     if (this.sweepTimer === undefined) this.sweepTimer = setInterval(() => this.expireTickets(), 5_000)
   }
 
+  startPlayback(senderId: number, sourceUrl: string): PlaybackSession {
+    this.endPlayback(senderId)
+    const session = { sessionId: randomBytes(24).toString('base64url'), sourceUrl }
+    this.playbackSessions.set(senderId, session)
+    return { ...session }
+  }
+
+  endPlayback(senderId: number, sessionId?: string): void {
+    const session = this.playbackSessions.get(senderId)
+    if (sessionId !== undefined && session?.sessionId !== sessionId) return
+    this.playbackSessions.delete(senderId)
+    for (const [key, request] of this.active) {
+      if (request.senderId === senderId && request.kind !== 'logo') {
+        this.cancelByKey(key, new Error('播放会话已结束'))
+      }
+    }
+  }
+
+  revokePlayback(): void {
+    for (const senderId of this.playbackSessions.keys()) this.endPlayback(senderId)
+  }
+
   async fetch(senderId: number, input: unknown): Promise<RemoteResourceFetchResult> {
     const request = validateRemoteResourceRequest(input)
     this.options.assertAllowed(request.kind)
+    this.assertPlaybackSession(senderId, request)
     this.reserve(senderId, request.requestId)
     const key = remoteFetchKey(senderId, request.requestId)
     const controller = new AbortController()
     this.active.set(key, { controller, senderId, kind: request.kind, mode: 'buffered', streamToken: '' })
     try {
-      return { ok: true, response: await this.fetchResource(request, controller.signal) }
+      const response = await this.fetchResource(request, controller.signal)
+      this.options.assertAllowed(request.kind)
+      this.assertPlaybackSession(senderId, request)
+      if (controller.signal.aborted) throw new Error('远程资源请求已取消')
+      return { ok: true, response }
     } catch (error) {
       return {
         ok: false,
@@ -86,6 +116,7 @@ export class RemoteResourceBroker {
   prepareStream(senderId: number, input: unknown): { streamUrl: string } {
     const request = validateRemoteStreamRequest(input)
     this.options.assertAllowed(request.kind)
+    this.assertPlaybackSession(senderId, request)
     this.reserve(senderId, request.requestId)
     const key = remoteFetchKey(senderId, request.requestId)
     const controller = new AbortController()
@@ -114,6 +145,7 @@ export class RemoteResourceBroker {
   }
 
   abortSender(senderId: number): void {
+    this.playbackSessions.delete(senderId)
     this.tickets.removeWhere((entry) => entry.senderId === senderId)
     for (const [key, request] of this.active) {
       if (request.senderId !== senderId) continue
@@ -127,6 +159,7 @@ export class RemoteResourceBroker {
     this.sweepTimer = undefined
     for (const request of this.active.values()) request.controller.abort(new Error('应用正在退出'))
     this.active.clear()
+    this.playbackSessions.clear()
     this.tickets.clear()
   }
 
@@ -158,6 +191,7 @@ export class RemoteResourceBroker {
 
     try {
       const result = await this.streamResource(entry.request, entry.controller.signal)
+      if (entry.controller.signal.aborted) throw new Error('播放会话已结束')
       const iterator = result.body[Symbol.asyncIterator]()
       let finished = false
       const finish = (): void => {
@@ -221,6 +255,14 @@ export class RemoteResourceBroker {
       throw new Error(`同时进行的远程资源请求不能超过 ${MAX_CONCURRENT_REMOTE_FETCHES} 个`)
     }
     if (this.active.has(remoteFetchKey(senderId, requestId))) throw new Error('远程资源请求 ID 已在使用')
+  }
+
+  private assertPlaybackSession(senderId: number, request: RemoteResourceRequest): void {
+    if (request.kind === 'logo') return
+    const session = this.playbackSessions.get(senderId)
+    if (!session || session.sessionId !== request.playbackSessionId) {
+      throw new Error('播放会话已失效，请重新选择频道')
+    }
   }
 
   private countForSender(senderId: number): number {

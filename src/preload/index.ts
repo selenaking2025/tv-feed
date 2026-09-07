@@ -3,6 +3,7 @@ import type { CatalogLoadCommand, CatalogSyncProgress } from '../shared/catalog-
 import { IPC_CHANNELS, type TvFeedBridge } from '../shared/ipc-contract.ts'
 import type { RemoteResourceRequest } from '../shared/remote-resource-contracts.ts'
 import type { LegacySafetyPreferences } from '../shared/safety-contracts.ts'
+import type { PlaybackStartCommand } from '../shared/playback-contracts.ts'
 
 const bridge: TvFeedBridge = Object.freeze({
   platform: process.platform,
@@ -23,6 +24,8 @@ const bridge: TvFeedBridge = Object.freeze({
   fetchRemoteResource: (request: RemoteResourceRequest) => ipcRenderer.invoke(IPC_CHANNELS.remoteFetch, request),
   prepareRemoteResourceStream: (request: RemoteResourceRequest) => ipcRenderer.invoke(IPC_CHANNELS.remotePrepareStream, request),
   cancelRemoteResource: (requestId: string) => ipcRenderer.send(IPC_CHANNELS.remoteCancel, requestId),
+  startPlayback: (command: PlaybackStartCommand) => ipcRenderer.invoke(IPC_CHANNELS.playbackStart, command),
+  endPlayback: (sessionId: string) => ipcRenderer.send(IPC_CHANNELS.playbackEnd, sessionId),
   isNetworkOnline: () => ipcRenderer.invoke(IPC_CHANNELS.networkStatus),
   getAppVersion: () => ipcRenderer.invoke(IPC_CHANNELS.appVersion),
   setPlayerFullscreen: (fullscreen: boolean) => ipcRenderer.invoke(IPC_CHANNELS.playerSetFullscreen, fullscreen),
@@ -43,6 +46,8 @@ function isCatalogSyncProgress(value: unknown): value is CatalogSyncProgress {
   const candidate = value as Partial<CatalogSyncProgress>
   return typeof candidate.operationId === 'string' &&
     /^[A-Za-z0-9:_-]{1,128}$/.test(candidate.operationId) &&
+    (candidate.requestId === undefined ||
+      (typeof candidate.requestId === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(candidate.requestId))) &&
     typeof candidate.message === 'string' &&
     typeof candidate.stage === 'string' &&
     ['checking-cache', 'connecting', 'core-data', 'metadata', 'processing', 'writing-cache', 'verifying-cache']

@@ -39,7 +39,8 @@ app.whenReady().then(async () => {
   const safety = new SafetyCoordinator({
     store: new FileSafetyStateStore(join(app.getPath('userData'), 'safety-state-v1.json')),
     invalidateCatalog: () => catalog.invalidateCache(),
-    cancelRemoteLogos: () => resources?.cancelKind('logo')
+    cancelRemoteLogos: () => resources?.cancelKind('logo'),
+    revokePlayback: () => resources?.revokePlayback()
   })
   resources = new RemoteResourceBroker({
     assertAllowed: (kind) => safety.assertRemoteResourceAllowed(kind),
@@ -116,6 +117,10 @@ function createMainWindow(resources: RemoteResourceBroker): void {
     if (!isTrustedRendererUrl(targetUrl, runtime)) event.preventDefault()
   })
   createdWindow.webContents.once('destroyed', () => resources.abortSender(rendererId))
+  createdWindow.webContents.on('render-process-gone', () => resources.abortSender(rendererId))
+  createdWindow.webContents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame && !details.isSameDocument) resources.abortSender(rendererId)
+  })
   createdWindow.once('ready-to-show', () => createdWindow.show())
   createdWindow.on('enter-full-screen', () => {
     if (!createdWindow.isDestroyed()) createdWindow.webContents.send(IPC_CHANNELS.playerFullscreenChanged, true)

@@ -139,6 +139,60 @@ test('未来时间戳缓存不会被误判为新鲜缓存', async () => {
   assert.equal(result.cacheStatus, 'network')
 })
 
+test('清除缓存后的刷新不加入旧任务，并重新写入可供下次启动的缓存', async () => {
+  const cache = new MemoryCatalogCache()
+  const oldGate = deferred<void>()
+  let fetches = 0
+  const coordinator = new CatalogCoordinator({cache, fetchCatalog: async () => {
+    const index = ++fetches
+    if (index === 1) await oldGate.promise
+    return {catalog: createOfflineSampleCatalog(`2026-08-11T00:00:0${index}.000Z`), warnings: []}
+  }})
+  const old = coordinator.load({intent:'refresh'}, 'standard')
+  await nextTurn()
+  await coordinator.invalidateCache()
+  const replacement = coordinator.load({intent:'refresh'}, 'standard')
+  assert.notStrictEqual(old, replacement)
+  await replacement
+  oldGate.resolve()
+  await old
+  assert.equal(fetches, 2)
+  assert.equal(cache.writes.length, 1)
+  assert.equal(cache.writes[0]?.catalog.generatedAt, '2026-08-11T00:00:02.000Z')
+})
+
+test('播放准入只接受已返回的当前安全范围目录中的频道与线路', async () => {
+  const coordinator = new CatalogCoordinator({cache: new MemoryCatalogCache()})
+  const result = coordinator.loadOfflineDemo('standard')
+  const channel = result.catalog.channels[0]!
+  const source = channel.sources[0]!
+  assert.equal(coordinator.playbackSource('standard', channel.id, source.id).url, source.url)
+  assert.throws(() => coordinator.playbackSource('family', channel.id, source.id))
+  assert.throws(() => coordinator.playbackSource('standard', 'Unknown.channel', source.id))
+  assert.throws(() => coordinator.playbackSource('standard', channel.id, 'Unknown.source'))
+})
+
+test('首次加载期间清除缓存后，返回的内存目录仍可播放但不会写回磁盘', async () => {
+  const cache = new MemoryCatalogCache()
+  const gate = deferred<void>()
+  const coordinator = new CatalogCoordinator({
+    cache,
+    fetchCatalog: async () => {
+      await gate.promise
+      return { catalog: createOfflineSampleCatalog(), warnings: [] }
+    }
+  })
+  const loading = coordinator.load({ intent: 'startup' }, 'standard')
+  await nextTurn()
+  await coordinator.invalidateCache()
+  gate.resolve()
+  const result = await loading
+  const channel = result.catalog.channels[0]!
+  const source = channel.sources[0]!
+  assert.equal(cache.writes.length, 0)
+  assert.equal(coordinator.playbackSource('standard', channel.id, source.id).url, source.url)
+})
+
 interface Deferred<T> {
   promise: Promise<T>
   resolve(value: T): void

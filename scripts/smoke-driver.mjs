@@ -83,6 +83,8 @@ export async function runSmokeInspection(webContents                      , runt
       let sidebarCollapseWorks = false
       let sidebarRestoreWorks = false
       let playerExpansion = 0
+      const sidebarMode = matchMedia('(max-width: 1040px)').matches ? 'drawer' : 'dock'
+      let drawerDismissWorks = false
       if (
         app instanceof HTMLElement &&
         playerStage instanceof HTMLElement &&
@@ -110,6 +112,38 @@ export async function runSmokeInspection(webContents                      , runt
           getComputedStyle(channelPane).display !== 'none' &&
           sidebarToggle.getAttribute('aria-expanded') === 'true' &&
           !channelPane.inert
+      } else if (
+        app instanceof HTMLElement &&
+        sidebarClose instanceof HTMLButtonElement &&
+        sidebarToggle instanceof HTMLButtonElement &&
+        channelPane instanceof HTMLElement &&
+        sidebarMode === 'drawer'
+      ) {
+        const settleDrawer = () => new Promise(resolve => setTimeout(resolve, 300))
+        sidebarToggle.click()
+        await settleDrawer()
+        const openRect = channelPane.getBoundingClientRect()
+        sidebarRestoreWorks =
+          app.classList.contains('sidebar-open') &&
+          sidebarToggle.getAttribute('aria-expanded') === 'true' &&
+          !channelPane.inert &&
+          openRect.left >= 0 && openRect.right <= innerWidth &&
+          openRect.width > 200 && document.activeElement === search
+        sidebarClose.click()
+        await settleDrawer()
+        sidebarCollapseWorks =
+          !app.classList.contains('sidebar-open') &&
+          sidebarToggle.getAttribute('aria-expanded') === 'false' &&
+          channelPane.inert && channelPane.getBoundingClientRect().right <= 0
+        sidebarToggle.click()
+        await settleDrawer()
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+        const escapeClosed = !app.classList.contains('sidebar-open') && channelPane.inert
+        sidebarToggle.click()
+        await settleDrawer()
+        document.querySelector('#drawer-scrim')?.click()
+        drawerDismissWorks = escapeClosed && !app.classList.contains('sidebar-open') && channelPane.inert
+        await settleDrawer()
       }
       const focusOutlineVisible = [...document.styleSheets].some((sheet) =>
         [...sheet.cssRules].some((rule) => rule instanceof CSSStyleRule &&
@@ -201,6 +235,8 @@ export async function runSmokeInspection(webContents                      , runt
         sidebarCollapseWorks,
         sidebarRestoreWorks,
         playerExpansion,
+        sidebarMode,
+        drawerDismissWorks,
         searchLabel: search?.getAttribute('aria-label') ?? '',
         resultCountAnnounced: resultCount?.getAttribute('role') === 'status' && resultCount?.getAttribute('aria-live') === 'polite',
         channelHealthAnnounced: channelHealth?.getAttribute('role') === 'status' && channelHealth?.getAttribute('aria-live') === 'polite',

@@ -23,6 +23,7 @@ TV Feed 与 iptv-org、电视台、频道及内容权利人没有隶属、赞助
 - 首次启动没有缓存时实时同步 iptv-org，原子写入并复读验证本机目录缓存
 - 在线同步失败时显示错误类别、重试和诊断入口；不会自动用虚构样例冒充真实目录
 - 内置离线演示仅在用户主动选择后打开，并始终明确标记为 8 个虚构样例
+- 离线演示的收藏和观看记录独立保存在内存，不覆盖真实频道的个人记录
 - 远程频道 Logo 默认关闭，可由用户主动开启
 - 在应用内清除目录缓存、收藏和观看记录
 
@@ -62,10 +63,15 @@ npm test
 npm run build
 npm run smoke
 npm run verify:hls:mpeg-ts
+npm run verify:regressions
 npm run verify:public-release
 ```
 
 私有仓库的 GitHub Actions 会在每次推送到 `main` 和每个 Pull Request 上使用官方 npm registry 执行全新 `npm ci`、仓库边界检查、类型检查、单元测试和生产构建。构建后还会在虚拟显示器中真正启动 Electron、验证 renderer，并运行离线 MPEG-TS 交错 A/B；因此 Electron npm 包存在但二进制缺失时不会被“只构建”掩盖。仓库边界检查会拒绝频道缓存、M3U、安装包、未批准图片、常见凭据、非官方依赖下载地址，以及渲染进程直接联网等回归。
+
+CI 还会在 macOS 原生环境验证家庭模式、组合回归和打包后的实际启动。Linux 作业使用 `build:app` 完成已经通过类型检查和测试后的纯构建，避免重复执行相同检查。
+
+`npm run verify:regressions` 需要 FFmpeg。它使用临时目录和生成的视频信号，真实运行 renderer、preload、IPC 与主进程服务，验证演示记录隔离、家庭切换拦截、失败后重试、目录请求乱序、断网恢复和 60 秒连续播放。不会读取日常使用的观看数据，也不依赖第三方直播源。只检查交互问题时可用 `npm run verify:regressions -- --behavior-only` 跳过视频生成和连续播放。
 
 `npm run smoke` 会使用内置虚构样例目录真实启动 Electron、检查主要界面状态，并将截图写入系统临时目录。样例线路使用保留的 `.invalid` 域名，不代表任何真实频道或直播源。
 

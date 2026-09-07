@@ -1,4 +1,4 @@
-import Hls from 'hls.js'
+import type Hls from 'hls.js'
 import type { CatalogSource } from '../../shared/catalog-contracts.ts'
 import {
   classifyPlaybackDiagnostic,
@@ -12,7 +12,6 @@ import {
   type PlaybackMetricsSnapshot
 } from '../../shared/playback-metrics.ts'
 import { decideStallRecovery } from '../../shared/playback-stability.ts'
-import { createSecureHls } from './hls-engine.ts'
 
 const AUTOPLAY_BUFFER_TARGET_SECONDS = 5
 const AUTOPLAY_BUFFER_MAX_WAIT_MS = 8_000
@@ -36,6 +35,7 @@ export class StreamPlayer {
   private readonly callbacks: PlayerCallbacks
   private hls: Hls | undefined
   private currentSource: CatalogSource | undefined
+  private playbackSessionId = ''
   private shouldAutoplay = false
   private mediaRecoveryAttempted = false
   private stopping = false
@@ -100,7 +100,7 @@ export class StreamPlayer {
     }
   }
 
-  load(source: CatalogSource, autoplay = true): void {
+  load(source: CatalogSource, channelId: string, autoplay = true): void {
     this.releaseMedia()
     this.currentSource = source
     this.shouldAutoplay = autoplay
@@ -108,16 +108,31 @@ export class StreamPlayer {
     this.stallRecoveryAttempted = false
     this.beginMetrics()
     this.callbacks.onState('loading', '正在连接直播线路…')
+    void this.connect(source, channelId, this.loadGeneration)
+  }
 
-    if (Hls.isSupported()) {
-      const hls = createSecureHls()
+  private async connect(source: CatalogSource, channelId: string, generation: number): Promise<void> {
+    try {
+      const session = await window.tvFeed.startPlayback({ channelId, sourceId: source.id })
+      if (generation !== this.loadGeneration) {
+        window.tvFeed.endPlayback(session.sessionId)
+        return
+      }
+      this.playbackSessionId = session.sessionId
+      const { createSecureHls, Hls } = await import('./hls-engine.ts')
+      if (generation !== this.loadGeneration) return
+      if (!Hls.isSupported()) throw new Error('当前系统无法启用安全 HLS 加载器')
+      const hls = createSecureHls('production-forced', session.sessionId)
       this.hls = hls
-      const generation = this.loadGeneration
-      this.hls.attachMedia(this.video)
-      this.hls.on(Hls.Events.MEDIA_ATTACHED, () => this.hls?.loadSource(source.url))
-      this.hls.on(Hls.Events.MANIFEST_PARSED, () => void this.playIfRequested(generation))
-      this.hls.on(Hls.Events.FRAG_LOADED, (_event, data) => this.trackFragment(data))
-      this.hls.on(Hls.Events.ERROR, (_event, data) => {
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+        if (generation === this.loadGeneration) hls.loadSource(session.sourceUrl)
+      })
+      hls.on(Hls.Events.MANIFEST_PARSED, () => void this.playIfRequested(generation))
+      hls.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+        if (generation === this.loadGeneration) this.trackFragment(data)
+      })
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (generation !== this.loadGeneration) return
         if (!data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           this.retryCount += 1
           this.emitMetrics()
@@ -126,24 +141,26 @@ export class StreamPlayer {
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !this.mediaRecoveryAttempted) {
           this.mediaRecoveryAttempted = true
           this.callbacks.onState('loading', '正在恢复视频信号…')
-          this.hls?.recoverMediaError()
+          hls.recoverMediaError()
           return
         }
         this.fail(data.details, data.error, data.response?.text, data.reason, data.type)
       })
-      return
+      hls.attachMedia(this.video)
+    } catch (error) {
+      if (generation === this.loadGeneration) this.fail(error)
     }
-
-    this.fail('当前系统无法启用安全 HLS 加载器')
   }
 
   async toggle(): Promise<void> {
     if (!this.currentSource) return
+    this.shouldAutoplay = false
+    const generation = this.loadGeneration
     if (this.video.paused) {
       try {
         await this.video.play()
       } catch (error) {
-        this.reportPlayRejection(error, 'manual')
+        if (generation === this.loadGeneration) this.reportPlayRejection(error, 'manual')
       }
     } else {
       this.video.pause()
@@ -193,7 +210,7 @@ export class StreamPlayer {
     try {
       await this.video.play()
     } catch (error) {
-      this.reportPlayRejection(error, 'deferred')
+      if (generation === this.loadGeneration) this.reportPlayRejection(error, 'deferred')
     }
   }
 
@@ -215,6 +232,8 @@ export class StreamPlayer {
     this.callbacks.onState(diagnostic.code === 'network-unavailable' ? 'waiting-network' : 'error', diagnostic.message)
     this.hls?.destroy()
     this.hls = undefined
+    this.endSession()
+    this.currentSource = undefined
     this.callbacks.onFatal(failedSource, diagnostic)
   }
 
@@ -225,6 +244,7 @@ export class StreamPlayer {
     this.stopMetricsTimer()
     this.hls?.destroy()
     this.hls = undefined
+    this.endSession()
     this.video.pause()
     this.video.removeAttribute('src')
     this.video.load()
@@ -235,8 +255,14 @@ export class StreamPlayer {
     this.stopping = false
   }
 
+  private endSession(): void {
+    if (this.playbackSessionId) window.tvFeed.endPlayback(this.playbackSessionId)
+    this.playbackSessionId = ''
+  }
+
   private bindVideoEvents(): void {
     this.video.addEventListener('playing', () => {
+      if (this.stopping || !this.currentSource) return
       if (this.firstPlayingAt === 0) {
         this.firstPlayingAt = performance.now()
       }

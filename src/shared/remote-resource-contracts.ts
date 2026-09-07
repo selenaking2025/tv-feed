@@ -4,6 +4,7 @@ export interface RemoteResourceRequest {
   requestId: string
   url: string
   kind: RemoteResourceKind
+  playbackSessionId?: string
   rangeStart?: number
   rangeEnd?: number
 }

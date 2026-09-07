@@ -99,6 +99,10 @@ test('架构门禁固定共享契约、依赖方向、IPC、运行配置和主�
   unsafeEntries.set('src/main/index.ts', `import './smoke-driver.ts'\nipcMain.handle(channel, handler)\nprotocol.handle('tvfeed', handler)`)
   unsafeEntries.set('src/shared/contracts.ts', 'export {}')
   const violations = findArchitectureBoundaryViolations(unsafeEntries).join('\n')
+  unsafeEntries.set('src/renderer/src/viewing-bypass.ts', `localStorage.setItem('tvfeed:favorites:v1', '[]')`)
+  assert.match(findArchitectureBoundaryViolations(unsafeEntries).join('\n'), /观看数据键只能由 viewing-state.ts 管理/)
+  unsafeEntries.set('src/renderer/src/playback-bypass.ts', `const channel = 'playback:start'`)
+  assert.match(findArchitectureBoundaryViolations(unsafeEntries).join('\n'), /playback-bypass.*IPC 通道字面量/)
   assert.match(violations, /单体共享契约不得恢复/)
   assert.match(violations, /renderer 层不得依赖/)
   assert.match(violations, /IPC 通道字面量/)
@@ -115,7 +119,9 @@ test('基本密钥扫描识别常见凭据而不把普通配置误报为密钥',
 })
 
 test('CI 门禁要求最小权限、完整提交哈希和完整验证命令', () => {
-  const safeWorkflow = `permissions:\n  contents: read\nsteps:\n  - uses: actions/checkout@${'a'.repeat(40)}\n  - run: npm ci --registry=https://registry.npmjs.org\n  - run: sudo chown root:root node_modules/electron/dist/chrome-sandbox\n  - run: sudo chmod 4755 node_modules/electron/dist/chrome-sandbox\n  - run: npm run verify:repository\n  - run: npm run verify:public-release:static\n  - run: npm run typecheck\n  - run: npm test\n  - run: npm run build\n  - run: xvfb-run --auto-servernum npm run smoke\n  - run: sudo apt-get install --yes --no-install-recommends ffmpeg\n  - run: xvfb-run --auto-servernum npm run verify:hls:mpeg-ts\n`
+  const safeWorkflow = `permissions:\n  contents: read\nsteps:\n  - uses: actions/checkout@${'a'.repeat(40)}\n  - run: npm ci --registry=https://registry.npmjs.org\n  - run: sudo chown root:root node_modules/electron/dist/chrome-sandbox\n  - run: sudo chmod 4755 node_modules/electron/dist/chrome-sandbox\n  - run: npm run verify:repository\n  - run: npm run verify:public-release:static\n  - run: npm run typecheck\n  - run: npm test\n  - run: npm run build:app\n  - run: xvfb-run --auto-servernum npm run smoke\n  - run: sudo apt-get install --yes --no-install-recommends ffmpeg\n  - run: xvfb-run --auto-servernum npm run verify:hls:mpeg-ts\n  - run: xvfb-run --auto-servernum npm run verify:regressions\n  - runs-on: macos-15\n  - run: npx --no-install electron-builder --mac dir --arm64 --publish never\n  - env: { }\n    TVFEED_EXPECT_PACKAGED: '1'\n`
   assert.deepEqual(findWorkflowViolations(safeWorkflow), [])
+  assert.match(findWorkflowViolations(safeWorkflow.replace('xvfb-run --auto-servernum npm run verify:regressions', '')).join('\n'), /verify:regressions/)
+  assert.match(findWorkflowViolations(safeWorkflow.replace('runs-on: macos-15', '')).join('\n'), /macos-15/)
   assert.match(findWorkflowViolations(safeWorkflow.replace(`@${'a'.repeat(40)}`, '@v6')).join('\n'), /完整提交哈希/)
 })

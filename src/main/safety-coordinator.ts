@@ -11,6 +11,7 @@ export interface SafetyCoordinatorOptions {
   store: SafetyStateStorePort
   invalidateCatalog: () => Promise<boolean>
   cancelRemoteLogos: () => void
+  revokePlayback: () => void
   now?: () => number
 }
 
@@ -75,6 +76,7 @@ export class SafetyCoordinator {
       // The restrictive state is durable before any cleanup begins. From this
       // point, resource admission rejects logos even if cleanup later fails.
       this.options.cancelRemoteLogos()
+      this.options.revokePlayback()
 
       let warning = ''
       try {

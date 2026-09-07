@@ -1,11 +1,4 @@
-import {
-  appendChannelNumberDigit,
-  CHANNEL_NUMBER_COMMIT_DELAY_MS,
-  channelIndexForNumber,
-  hasLongerChannelNumber
-} from '../../shared/channel-shortcuts.ts'
 import type {
-  CacheStatus,
   Catalog,
   CatalogChannel,
   CatalogLoadFailure,
@@ -13,7 +6,7 @@ import type {
   CatalogSource,
   CatalogSyncProgress
 } from '../../shared/catalog-contracts.ts'
-import { displayCountryName, getCountrySearchAliases, sortCountriesForDisplay } from '../../shared/countries.ts'
+import { displayCountryName } from '../../shared/countries.ts'
 import { hasVerifiedOfficialSource, isVerifiedOfficialSource } from '../../shared/official-sources.ts'
 import {
   classifyPlaybackDiagnostic,
@@ -22,39 +15,22 @@ import {
 } from '../../shared/playback-diagnostics.ts'
 import type { PlaybackMetricsSnapshot } from '../../shared/playback-metrics.ts'
 import type { SafetyStateSnapshot } from '../../shared/safety-contracts.ts'
-import {
-  parseSourceHealthStore,
-  rankSources,
-  recordSourceFailure,
-  recordSourceSuccess,
-  serializeSourceHealthStore
-} from '../../shared/source-health.ts'
+import { rankSources } from '../../shared/source-health.ts'
 import { StreamPlayer, type PlaybackState } from './player.ts'
 import {
   PlaybackNetworkRecoveryGate,
   type PlaybackNetworkTarget
 } from './playback-network-recovery.ts'
-import {
-  readStoredArray,
-  readStoredString,
-  removeStoredValue,
-  writeStoredArray,
-  writeStoredString
-} from './local-state.ts'
+import { ViewingState } from './viewing-state.ts'
+import { CatalogRequests } from './catalog-requests.ts'
+import { createCatalogStatusView } from './catalog-status-view.ts'
+import { createKeyboardControls } from './keyboard-controls.ts'
 import { RemoteLogoController } from './remote-logo-controller.ts'
 import { SafetyClient } from './safety-client.ts'
+import { createChannelList, type ViewMode } from './channel-list.ts'
 
-type ViewMode = 'all' | 'chinese' | 'favorites' | 'recent'
-
-const ROW_HEIGHT = 76
-const OVERSCAN = 7
-const FAVORITES_KEY = 'tvfeed:favorites:v1'
-const RECENTS_KEY = 'tvfeed:recents:v1'
-const LAST_CHANNEL_KEY = 'tvfeed:last-channel:v1'
-const SOURCE_HEALTH_KEY = 'tvfeed:source-health:v1'
 const NETWORK_RECOVERY_DELAY_MS = 3_000
 const NETWORK_RECOVERY_COOLDOWN_MS = 30_000
-const CHINESE_REGIONS = new Set(['CN', 'HK', 'TW', 'MO'])
 const compactSidebarQuery = window.matchMedia('(max-width: 1040px)')
 
 const elements = {
@@ -118,23 +94,18 @@ const elements = {
   announcementRegion: required<HTMLElement>('#announcement-region')
 }
 
+const viewing = new ViewingState()
+const catalogRequests = new CatalogRequests()
 let catalog: Catalog | undefined
-let filteredChannels: CatalogChannel[] = []
-let selectedChannelId = readStoredString(LAST_CHANNEL_KEY)
+let selectedChannelId = viewing.lastChannel
 let activeSourceIndex = 0
 let viewMode: ViewMode = 'all'
-let favorites = new Set(readStoredArray(FAVORITES_KEY))
-let recents = readStoredArray(RECENTS_KEY)
-let sourceHealthRecords = readStoredSourceHealth()
 let failedSources = new Set<string>()
 let healthRecordedForLoad = false
 let refreshInProgress = false
 let catalogSyncActive = false
 let familySafetyEnabled = false
 let remoteLogosEnabled = false
-let currentCacheStatus: CacheStatus = 'offline-sample'
-let channelNumberBuffer = ''
-let channelNumberTimer: number | undefined
 let announcementTimer: number | undefined
 let fullscreenTransitionInProgress = false
 let playbackAttemptGeneration = 0
@@ -143,6 +114,11 @@ let networkRecoveryCheckGeneration: number | undefined
 const safetyClient = new SafetyClient(window.tvFeed)
 const remoteLogoController = new RemoteLogoController(window.tvFeed)
 const networkRecovery = new PlaybackNetworkRecoveryGate(NETWORK_RECOVERY_COOLDOWN_MS)
+const catalogStatus = createCatalogStatusView(elements, () => familySafetyEnabled)
+const {
+  populateFacets, renderCatalogStats, updateCatalogStatus,
+  setCatalogFailureVisible, setCatalogControlsEnabled, toggleCatalogDiagnostics
+} = catalogStatus
 
 const player = new StreamPlayer(elements.video, {
   onState: updatePlaybackState,
@@ -150,10 +126,28 @@ const player = new StreamPlayer(elements.video, {
   onMetrics: handlePlaybackMetrics
 })
 
+const channelList = createChannelList({
+  elements, viewing, catalog: () => catalog, viewMode: () => viewMode,
+  selectedChannelId: () => selectedChannelId, selectChannel, toggleFavorite,
+  createLogo, createOfficialBadge, createStarIcon, emptyMessage, resetChannelNumberBuffer
+})
+
+const keyboard = createKeyboardControls({
+  elements, compactSidebarQuery, channels: () => channelList.channels,
+  closeSidebar, toggleFullscreen, togglePictureInPicture, togglePlayback, moveChannel,
+  selectChannel, ensureChannelVisible, announce, showToast,
+  onMute: () => announceVolume(player.toggleMuted()),
+  onVolume: (delta) => announceVolume(player.adjustVolume(delta))
+})
+
+function resetChannelNumberBuffer(): void { keyboard.resetNumber() }
+
 bindEvents()
 void initialize()
 
 async function initialize(): Promise<void> {
+  const generation = catalogRequests.begin()
+  elements.refreshCatalog.disabled = true
   catalogSyncActive = true
   try {
     let safety = await safetyClient.initialize()
@@ -165,15 +159,20 @@ async function initialize(): Promise<void> {
     } else if (familySafetyEnabled) {
       enforceFamilyLocalState()
     }
-    const response = await window.tvFeed.loadCatalog({ intent: 'startup' })
+    elements.refreshCatalog.disabled = false
+    const response = await window.tvFeed.loadCatalog(catalogRequests.command('startup', generation))
+    if (!catalogRequests.isCurrent(generation)) return
     if (response.ok) applyCatalog(response.result)
     else showCatalogFailure(response.failure)
   } catch (error) {
-    showCatalogFailure(unexpectedCatalogFailure(error))
+    if (catalogRequests.isCurrent(generation)) showCatalogFailure(unexpectedCatalogFailure(error))
   } finally {
-    catalogSyncActive = false
+    if (catalogRequests.isCurrent(generation)) {
+      catalogSyncActive = false
+      elements.refreshCatalog.disabled = false
+      elements.loadingList.hidden = true
+    }
     syncSafetyControls()
-    elements.loadingList.hidden = true
     elements.app.dataset.appReady = 'true'
     window.tvFeed.signalRendererReady()
   }
@@ -184,7 +183,6 @@ function bindEvents(): void {
   elements.search.addEventListener('input', applyFilters)
   elements.country.addEventListener('change', applyFilters)
   elements.category.addEventListener('change', applyFilters)
-  elements.channelList.addEventListener('scroll', renderVirtualRows, { passive: true })
 
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')) {
     button.addEventListener('click', () => setViewMode(button.dataset.view as ViewMode))
@@ -219,10 +217,8 @@ function bindEvents(): void {
     if (event.target === elements.infoDialog) elements.infoDialog.close()
   })
 
-  document.addEventListener('keydown', handleGlobalKeydown)
-  window.addEventListener('resize', renderVirtualRows)
+  document.addEventListener('keydown', keyboard.handleKeydown)
   window.addEventListener('online', () => void retryPendingNetworkPlayback('online'))
-  new ResizeObserver(renderVirtualRows).observe(elements.channelList)
   syncSidebarState()
   syncFullscreenControl(false)
 }
@@ -232,24 +228,30 @@ function applyCatalog(result: CatalogLoadResult): void {
   setCatalogFailureVisible(false)
   setCatalogControlsEnabled(true)
   elements.loadingList.hidden = true
+  const previous = getChannel(selectedChannelId)
+  const playingSourceId = player.hasSource ? previous?.sources[activeSourceIndex]?.id : undefined
+  if (viewing.useCatalog(result.catalog.source)) selectedChannelId = viewing.lastChannel
   catalog = result.catalog
+  catalogRequests.index(catalog)
   elements.app.dataset.catalogSource = result.catalog.source
   elements.app.dataset.catalogCount = String(result.catalog.channels.length)
   populateFacets(result.catalog)
   renderCatalogStats(result.catalog)
   updateCatalogStatus(result.cacheStatus, result.catalog.channels.length)
 
-  const knownIds = new Set(result.catalog.channels.map((channel) => channel.id))
-  if (!familySafetyEnabled) favorites = new Set([...favorites].filter((id) => knownIds.has(id)))
-  recents = recents.filter((id) => knownIds.has(id)).slice(0, 100)
-  if (familySafetyEnabled) writeStoredArray(RECENTS_KEY, recents)
-  else persistCollections()
-
   applyFilters()
-  const initial = getChannel(selectedChannelId) ?? filteredChannels[0] ?? result.catalog.channels[0]
+  const initial = getChannel(selectedChannelId) ?? channelList.channels[0] ?? result.catalog.channels[0]
   if (initial) {
-    selectChannel(initial.id, false, false)
-    const initialIndex = filteredChannels.findIndex((channel) => channel.id === initial.id)
+    const retainedSourceIndex = initial.sources.findIndex((source) => source.id === playingSourceId)
+    if (initial.id === previous?.id && player.hasSource && retainedSourceIndex >= 0) {
+      activeSourceIndex = retainedSourceIndex
+      renderChannelDetail(initial)
+      renderSources(initial)
+    } else {
+      if (player.hasSource) player.stop()
+      selectChannel(initial.id, false, false)
+    }
+    const initialIndex = channelList.channels.findIndex((channel) => channel.id === initial.id)
     if (initialIndex >= 0) ensureChannelVisible(initialIndex)
   }
 
@@ -259,13 +261,15 @@ function applyCatalog(result: CatalogLoadResult): void {
 async function refreshCatalog(): Promise<void> {
   if (refreshInProgress) return
   refreshInProgress = true
+  const generation = catalogRequests.begin()
   elements.refreshCatalog.disabled = true
   elements.retryCatalog.disabled = true
   elements.openOfflineDemo.disabled = true
   syncSafetyControls()
   beginCatalogSync('正在从 iptv-org 更新…')
   try {
-    const response = await window.tvFeed.loadCatalog({ intent: 'refresh' })
+    const response = await window.tvFeed.loadCatalog(catalogRequests.command('refresh', generation))
+    if (!catalogRequests.isCurrent(generation)) return
     if (response.ok) {
       applyCatalog(response.result)
       showToast(response.result.cacheStatus === 'network' ? '频道目录已更新' : '已重新载入频道目录')
@@ -273,170 +277,21 @@ async function refreshCatalog(): Promise<void> {
       showCatalogFailure(response.failure)
     }
   } catch (error) {
-    showCatalogFailure(unexpectedCatalogFailure(error))
+    if (catalogRequests.isCurrent(generation)) showCatalogFailure(unexpectedCatalogFailure(error))
   } finally {
-    refreshInProgress = false
-    elements.refreshCatalog.disabled = false
-    elements.retryCatalog.disabled = false
-    elements.openOfflineDemo.disabled = false
-    syncSafetyControls()
+    if (catalogRequests.isCurrent(generation)) {
+      refreshInProgress = false
+      elements.refreshCatalog.disabled = false
+      elements.retryCatalog.disabled = false
+      elements.openOfflineDemo.disabled = false
+      syncSafetyControls()
+    }
   }
 }
 
-function populateFacets(value: Catalog): void {
-  replaceSelectOptions(
-    elements.country,
-    '所有地区',
-    sortCountriesForDisplay(value.countries).map((country) => ({
-      value: country.code,
-      label: `${country.flag} ${displayCountryName(country.code, country.name)} · ${formatCount(country.count)}`
-    }))
-  )
-  replaceSelectOptions(
-    elements.category,
-    '所有类型',
-    value.categories.map((category) => ({ value: category.id, label: `${category.name} · ${formatCount(category.count)}` }))
-  )
-}
-
-function replaceSelectOptions(select: HTMLSelectElement, allLabel: string, options: Array<{ value: string; label: string }>): void {
-  const previous = select.value
-  const nodes: HTMLOptionElement[] = []
-  const all = document.createElement('option')
-  all.value = ''
-  all.textContent = allLabel
-  nodes.push(all)
-  for (const item of options) {
-    const option = document.createElement('option')
-    option.value = item.value
-    option.textContent = item.label
-    nodes.push(option)
-  }
-  select.replaceChildren(...nodes)
-  if (options.some((item) => item.value === previous)) select.value = previous
-}
-
-function applyFilters(): void {
-  if (!catalog) return
-  resetChannelNumberBuffer()
-  const query = elements.search.value.trim().toLocaleLowerCase()
-  const countryCode = elements.country.value
-  const categoryId = elements.category.value
-  const recentOrder = new Map(recents.map((id, index) => [id, index]))
-
-  filteredChannels = catalog.channels.filter((channel) => {
-    if (viewMode === 'chinese' && !CHINESE_REGIONS.has(channel.countryCode)) return false
-    if (viewMode === 'favorites' && !favorites.has(channel.id)) return false
-    if (viewMode === 'recent' && !recentOrder.has(channel.id)) return false
-    if (countryCode && channel.countryCode !== countryCode) return false
-    if (categoryId && !channel.categoryIds.includes(categoryId)) return false
-    if (query && !channel.searchText.includes(query) && !getCountrySearchAliases(channel.countryCode).includes(query)) return false
-    return true
-  })
-
-  if (viewMode === 'recent') {
-    filteredChannels.sort((a, b) => (recentOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (recentOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER))
-  }
-
-  elements.resultCount.textContent = `${formatCount(filteredChannels.length)} 个频道`
-  elements.channelList.scrollTop = 0
-  elements.channelSpacer.style.height = `${filteredChannels.length * ROW_HEIGHT}px`
-  renderVirtualRows()
-}
-
-function renderVirtualRows(): void {
-  if (!catalog) return
-  if (filteredChannels.length === 0) {
-    elements.channelSpacer.style.height = '0px'
-    const empty = document.createElement('div')
-    empty.className = 'empty-list'
-    empty.textContent = emptyMessage()
-    elements.channelWindow.style.transform = 'translateY(0)'
-    elements.channelWindow.replaceChildren(empty)
-    return
-  }
-
-  const viewportHeight = Math.max(elements.channelList.clientHeight, ROW_HEIGHT * 6)
-  const start = Math.max(0, Math.floor(elements.channelList.scrollTop / ROW_HEIGHT) - OVERSCAN)
-  const end = Math.min(filteredChannels.length, Math.ceil((elements.channelList.scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN)
-  const fragment = document.createDocumentFragment()
-
-  for (let index = start; index < end; index += 1) {
-    const channel = filteredChannels[index]
-    if (channel) fragment.append(createChannelRow(channel, index))
-  }
-
-  elements.channelWindow.style.transform = `translateY(${start * ROW_HEIGHT}px)`
-  elements.channelWindow.replaceChildren(fragment)
-}
-
-function createChannelRow(channel: CatalogChannel, index: number): HTMLElement {
-  const row = document.createElement('div')
-  row.className = 'channel-row'
-  row.dataset.channelRow = 'true'
-  row.dataset.channelId = channel.id
-  row.dataset.channelSelected = String(channel.id === selectedChannelId)
-  row.setAttribute('role', 'listitem')
-
-  const select = document.createElement('button')
-  select.className = 'channel-select'
-  select.type = 'button'
-  select.dataset.channelIndex = String(index)
-  const containsVerifiedOfficialSource = hasVerifiedOfficialSource(channel)
-  select.setAttribute(
-    'aria-label',
-    `播放 ${channel.name}，${channel.countryName}，${channel.sources.length} 条线路${containsVerifiedOfficialSource ? '，包含人工核对的官方线路' : ''}`
-  )
-  select.addEventListener('click', () => selectChannel(channel.id, true, true))
-  select.addEventListener('keydown', handleRowKeydown)
-
-  const logo = createLogo(channel, 'channel-logo')
-  const copy = document.createElement('span')
-  copy.className = 'channel-copy'
-  const name = document.createElement('span')
-  name.className = 'channel-name'
-  name.textContent = channel.name
-  const nameLine = document.createElement('span')
-  nameLine.className = 'channel-name-line'
-  nameLine.append(name)
-  if (containsVerifiedOfficialSource) nameLine.append(createOfficialBadge('含官方源'))
-  const subtitle = document.createElement('span')
-  subtitle.className = 'channel-subtitle'
-  const region = document.createElement('span')
-  region.textContent = `${channel.flag} ${displayCountryName(channel.countryCode, channel.countryName)}`.trim()
-  const separator = document.createElement('span')
-  separator.textContent = '·'
-  const sourceCount = document.createElement('span')
-  sourceCount.className = 'source-count'
-  sourceCount.textContent = `${channel.sources.length} 线`
-  subtitle.append(region, separator, sourceCount)
-  copy.append(nameLine, subtitle)
-  select.append(logo, copy)
-
-  const favorite = document.createElement('button')
-  favorite.className = 'row-favorite'
-  favorite.type = 'button'
-  favorite.setAttribute('aria-label', favorites.has(channel.id) ? `取消收藏 ${channel.name}` : `收藏 ${channel.name}`)
-  favorite.setAttribute('aria-pressed', String(favorites.has(channel.id)))
-  favorite.append(createStarIcon())
-  favorite.addEventListener('click', () => toggleFavorite(channel.id))
-
-  row.append(select, favorite)
-  return row
-}
-
-function handleRowKeydown(event: KeyboardEvent): void {
-  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-  event.preventDefault()
-  const current = Number((event.currentTarget as HTMLElement).dataset.channelIndex)
-  const target = clamp(current + (event.key === 'ArrowDown' ? 1 : -1), 0, filteredChannels.length - 1)
-  const channel = filteredChannels[target]
-  if (!channel) return
-  ensureChannelVisible(target)
-  requestAnimationFrame(() => {
-    elements.channelWindow.querySelector<HTMLButtonElement>(`.channel-select[data-channel-index="${target}"]`)?.focus()
-  })
-}
+function applyFilters(): void { channelList.applyFilters() }
+function renderVirtualRows(): void { channelList.render() }
+function ensureChannelVisible(index: number): void { channelList.ensureVisible(index) }
 
 function selectChannel(channelId: string, autoplay: boolean, rememberRecent: boolean): void {
   const channel = getChannel(channelId)
@@ -446,7 +301,7 @@ function selectChannel(channelId: string, autoplay: boolean, rememberRecent: boo
   selectedChannelId = channel.id
   activeSourceIndex = preferredSource(channel)?.index ?? 0
   failedSources = new Set()
-  writeStoredString(LAST_CHANNEL_KEY, channel.id)
+  viewing.select(channel.id)
 
   if (rememberRecent) addRecent(channel.id)
   renderVirtualRows()
@@ -527,10 +382,6 @@ function applySafetyState(state: SafetyStateSnapshot): void {
   syncSafetyControls()
 }
 
-function clearRemoteLogoResources(): void {
-  remoteLogoController.clear()
-}
-
 function disableRemoteLogos(): void {
   remoteLogosEnabled = false
   remoteLogoController.setEnabled(false)
@@ -539,12 +390,10 @@ function disableRemoteLogos(): void {
 
 function enforceFamilyLocalState(): void {
   disableRemoteLogos()
-  recents = []
   selectedChannelId = ''
-  removeStoredValue(RECENTS_KEY)
-  removeStoredValue(LAST_CHANNEL_KEY)
-  clearSourceHealthRecords()
+  healthRecordedForLoad = false
   player.stop()
+  if (!viewing.clearWatching()) throw new Error('观看记录未能完整清除，请重试或重新启动应用')
 }
 
 async function updateFamilySafetyPreference(): Promise<void> {
@@ -556,8 +405,23 @@ async function updateFamilySafetyPreference(): Promise<void> {
 
   const requested = elements.familySafetyToggle.checked
   if (requested === familySafetyEnabled) return
+  const generation = catalogRequests.begin()
   refreshInProgress = true
+  // Withdraw every old selection route before an asynchronous safety transition.
+  player.stop()
+  catalog = undefined
+  catalogRequests.clear()
+  channelList.clear()
+  delete elements.app.dataset.catalogSource
+  delete elements.app.dataset.catalogCount
+  elements.channelTitle.textContent = '正在切换频道目录…'
+  elements.channelMeta.replaceChildren()
+  elements.channelDescription.textContent = ''
+  elements.sourceList.replaceChildren()
+  elements.sourceHelp.textContent = ''
+  setCatalogControlsEnabled(false)
   elements.refreshCatalog.disabled = true
+  beginCatalogSync(requested ? '正在加载家庭安全目录…' : '正在恢复完整目录…')
   syncSafetyControls()
 
   try {
@@ -568,7 +432,8 @@ async function updateFamilySafetyPreference(): Promise<void> {
       applySafetyState(await safetyClient.acknowledgeCleanup(transition.state.transitionId))
     }
     elements.catalogState.textContent = familySafetyEnabled ? '正在加载家庭安全目录…' : '正在恢复完整目录…'
-    const response = await window.tvFeed.loadCatalog({ intent: 'refresh' })
+    const response = await window.tvFeed.loadCatalog(catalogRequests.command('refresh', generation))
+    if (!catalogRequests.isCurrent(generation)) return
     if (response.ok) {
       applyCatalog(response.result)
       const message = familySafetyEnabled
@@ -581,14 +446,18 @@ async function updateFamilySafetyPreference(): Promise<void> {
       setPrivacyStatus(`${response.failure.title}。${transition.warning}`)
     }
   } catch (error) {
+    if (!catalogRequests.isCurrent(generation)) return
     elements.familySafetyToggle.checked = familySafetyEnabled
+    showCatalogFailure(unexpectedCatalogFailure(error))
     const message = `切换家庭安全模式后目录加载失败：${errorMessage(error)}`
     setPrivacyStatus(message)
     showToast(message, 7000)
   } finally {
-    refreshInProgress = false
-    elements.refreshCatalog.disabled = false
-    syncSafetyControls()
+    if (catalogRequests.isCurrent(generation)) {
+      refreshInProgress = false
+      elements.refreshCatalog.disabled = false
+      syncSafetyControls()
+    }
   }
 }
 
@@ -638,19 +507,15 @@ async function clearCatalogCacheFromSettings(): Promise<void> {
 }
 
 function clearViewingDataFromSettings(): void {
-  favorites = new Set()
-  recents = []
-  removeStoredValue(FAVORITES_KEY)
-  removeStoredValue(RECENTS_KEY)
-  removeStoredValue(LAST_CHANNEL_KEY)
-  clearSourceHealthRecords()
+  const cleared = viewing.clearAll()
+  healthRecordedForLoad = false
   updateFavoriteButton()
   if (viewMode === 'favorites' || viewMode === 'recent') applyFilters()
   else renderVirtualRows()
 
-  const message = '收藏、最近观看、上次频道和线路稳定记录已从本机清除。'
+  const message = cleared ? '收藏、最近观看、上次频道和线路稳定记录已从本机清除。' : '部分观看记录未能清除，请重试。'
   setPrivacyStatus(message)
-  showToast('本地观看记录已清除')
+  showToast(cleared ? '本地观看记录已清除' : '观看记录清理未完成')
 }
 
 function setPrivacyStatus(message: string): void {
@@ -694,7 +559,7 @@ function playSource(source: CatalogSource, index: number, preserveDiagnostic = f
   updateChannelHealth('checking')
   updateSourceButtons()
   healthRecordedForLoad = false
-  player.load(source, true)
+  player.load(source, channel.id, true)
 }
 
 function updateSourceButtons(): void {
@@ -704,7 +569,7 @@ function updateSourceButtons(): void {
 }
 
 function preferredSource(channel: CatalogChannel, excludedSourceIds: ReadonlySet<string> = new Set()) {
-  return rankSources(channel.sources, sourceHealthRecords, excludedSourceIds)[0]
+  return rankSources(channel.sources, viewing.health, excludedSourceIds)[0]
 }
 
 function handlePlaybackMetrics(snapshot: PlaybackMetricsSnapshot): void {
@@ -718,26 +583,11 @@ function handlePlaybackMetrics(snapshot: PlaybackMetricsSnapshot): void {
   const observationMs = snapshot.mediaAdvancedSeconds * 1_000 + snapshot.stallDurationMs
   const stallRatio = observationMs > 0 ? snapshot.stallDurationMs / observationMs : 0
   if (stallRatio > 0.05 || (snapshot.droppedFrameRatio ?? 0) > 0.02) return
-  sourceHealthRecords = recordSourceSuccess(sourceHealthRecords, activeSource.id, {
+  viewing.recordSuccess(activeSource.id, {
     startupMs: snapshot.startupMs,
     stallRatio
   })
   healthRecordedForLoad = true
-  persistSourceHealthRecords()
-}
-
-function persistSourceHealthRecords(): void {
-  try {
-    localStorage.setItem(SOURCE_HEALTH_KEY, serializeSourceHealthStore(sourceHealthRecords))
-  } catch {
-    // Local ranking is optional; playback remains usable without storage.
-  }
-}
-
-function clearSourceHealthRecords(): void {
-  sourceHealthRecords = new Map()
-  healthRecordedForLoad = false
-  removeStoredValue(SOURCE_HEALTH_KEY)
 }
 
 async function handleFatalSource(failedSource: CatalogSource, diagnostic: PlaybackDiagnostic): Promise<void> {
@@ -769,8 +619,7 @@ async function handleFatalSource(failedSource: CatalogSource, diagnostic: Playba
     return
   }
   resetNetworkRecovery()
-  sourceHealthRecords = recordSourceFailure(sourceHealthRecords, current.id)
-  persistSourceHealthRecords()
+  viewing.recordFailure(current.id)
   failedSources.add(current.id)
   const next = preferredSource(channel, failedSources)
   if (next) {
@@ -876,13 +725,14 @@ function updatePlaybackState(state: PlaybackState, message: string): void {
 
 async function togglePlayback(): Promise<void> {
   if (await retryPendingNetworkPlayback('manual')) return
-  const channel = getChannel(selectedChannelId) ?? filteredChannels[0]
+  const channel = getChannel(selectedChannelId) ?? channelList.channels[0]
   if (!channel) {
     showToast('当前筛选条件下没有可播放频道')
     return
   }
   if (channel.id !== selectedChannelId) selectChannel(channel.id, false, false)
   if (!player.hasSource) {
+    failedSources = new Set()
     const preferred = preferredSource(channel)
     const source = channel.sources[activeSourceIndex] ?? preferred?.source
     if (source) playSource(source, channel.sources.indexOf(source))
@@ -902,57 +752,34 @@ function stopPlayback(): void {
 }
 
 function moveChannel(direction: -1 | 1): void {
-  if (filteredChannels.length === 0) return
-  const currentIndex = filteredChannels.findIndex((channel) => channel.id === selectedChannelId)
+  if (channelList.channels.length === 0) return
+  const currentIndex = channelList.channels.findIndex((channel) => channel.id === selectedChannelId)
   const base = currentIndex >= 0 ? currentIndex : direction > 0 ? -1 : 0
-  const targetIndex = (base + direction + filteredChannels.length) % filteredChannels.length
-  const channel = filteredChannels[targetIndex]
+  const targetIndex = (base + direction + channelList.channels.length) % channelList.channels.length
+  const channel = channelList.channels[targetIndex]
   if (!channel) return
   selectChannel(channel.id, true, true)
   ensureChannelVisible(targetIndex)
 }
 
-function ensureChannelVisible(index: number): void {
-  const top = index * ROW_HEIGHT
-  const bottom = top + ROW_HEIGHT
-  if (top < elements.channelList.scrollTop) elements.channelList.scrollTop = top
-  else if (bottom > elements.channelList.scrollTop + elements.channelList.clientHeight) {
-    elements.channelList.scrollTop = bottom - elements.channelList.clientHeight
-  }
-  renderVirtualRows()
-}
-
 function toggleFavorite(channelId: string): void {
   if (!channelId || !getChannel(channelId)) return
-  if (favorites.has(channelId)) {
-    favorites.delete(channelId)
-    showToast('已取消收藏')
-  } else {
-    favorites.add(channelId)
-    showToast('已加入收藏')
-  }
-  persistCollections()
+  showToast(viewing.toggleFavorite(channelId) ? '已加入收藏' : '已取消收藏')
   updateFavoriteButton()
   if (viewMode === 'favorites') applyFilters()
   else renderVirtualRows()
 }
 
 function updateFavoriteButton(): void {
-  const active = favorites.has(selectedChannelId)
+  const active = viewing.favorites.has(selectedChannelId)
   elements.favorite.setAttribute('aria-pressed', String(active))
   const label = elements.favorite.querySelector('span')
   if (label) label.textContent = active ? '已收藏' : '收藏'
 }
 
 function addRecent(channelId: string): void {
-  recents = [channelId, ...recents.filter((id) => id !== channelId)].slice(0, 100)
-  persistCollections()
+  viewing.remember(channelId)
   if (viewMode === 'recent') applyFilters()
-}
-
-function persistCollections(): void {
-  writeStoredArray(FAVORITES_KEY, [...favorites])
-  writeStoredArray(RECENTS_KEY, recents)
 }
 
 function setViewMode(mode: ViewMode): void {
@@ -996,79 +823,6 @@ function syncFullscreenControl(fullscreen: boolean): void {
   elements.fullscreen.title = fullscreen ? '退出全屏（F 或 Esc）' : '全屏（F）'
 }
 
-function handleGlobalKeydown(event: KeyboardEvent): void {
-  const target = event.target as HTMLElement | null
-  const isEditing = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement || target?.isContentEditable
-
-  if (event.key === 'Escape') {
-    if (elements.app.classList.contains('player-fullscreen')) {
-      event.preventDefault()
-      void toggleFullscreen()
-    } else if (compactSidebarQuery.matches && elements.app.classList.contains('sidebar-open')) closeSidebar()
-    return
-  }
-  if (elements.infoDialog.open) return
-  if (isEditing) return
-  if (event.key === '/') {
-    event.preventDefault()
-    elements.search.focus()
-    elements.search.select()
-    return
-  }
-  if (target instanceof HTMLButtonElement) return
-
-  if (/^\d$/.test(event.key) && !event.repeat) {
-    event.preventDefault()
-    queueChannelNumber(event.key)
-    return
-  }
-
-  switch (event.key.toLocaleLowerCase()) {
-    case 'arrowdown':
-      event.preventDefault()
-      moveChannel(1)
-      break
-    case 'arrowup':
-      event.preventDefault()
-      moveChannel(-1)
-      break
-    case 'j':
-      event.preventDefault()
-      moveChannel(1)
-      break
-    case 'k':
-      event.preventDefault()
-      moveChannel(-1)
-      break
-    case 'p':
-      event.preventDefault()
-      void togglePictureInPicture()
-      break
-    case 'f':
-      event.preventDefault()
-      void toggleFullscreen()
-      break
-    case 'm':
-      event.preventDefault()
-      announceVolume(player.toggleMuted())
-      break
-    case '+':
-    case '=':
-      event.preventDefault()
-      announceVolume(player.adjustVolume(0.1))
-      break
-    case '-':
-    case '_':
-      event.preventDefault()
-      announceVolume(player.adjustVolume(-0.1))
-      break
-    case ' ':
-      event.preventDefault()
-      void togglePlayback()
-      break
-  }
-}
-
 function openSidebar(): void {
   if (compactSidebarQuery.matches) elements.app.classList.add('sidebar-open')
   else elements.app.classList.remove('sidebar-collapsed')
@@ -1102,117 +856,31 @@ function syncSidebarState(): void {
   elements.channelPane.inert = !visible
 }
 
-function updateCatalogStatus(status: CacheStatus, count: number): void {
-  currentCacheStatus = status
-  delete elements.catalogState.dataset.syncStage
-  const labels: Record<CacheStatus, string> = {
-    network: `已同步 iptv-org · ${formatCount(count)} 台`,
-    'fresh-cache': `本机目录 · ${formatCount(count)} 台`,
-    'stale-cache': `离线缓存 · ${formatCount(count)} 台`,
-    'legacy-cache': `旧版离线缓存 · ${formatCount(count)} 台`,
-    'offline-sample': `离线样例 · ${formatCount(count)} 台`
-  }
-  elements.catalogState.textContent = `${labels[status]}${familySafetyEnabled ? ' · 家庭安全' : ''}`
-  elements.catalogState.classList.toggle('warning', status === 'stale-cache' || status === 'legacy-cache' || status === 'offline-sample')
-}
-
-function renderCatalogStats(value: Catalog): void {
-  const rows: Array<readonly [string, string]> = [
-    ['目录来源', value.source === 'iptv-org' ? 'iptv-org API' : '内置离线样例'],
-    ['家庭安全模式', familySafetyEnabled ? '已开启 · 本地允许列表' : '未开启 · 上游元数据保守过滤'],
-    ['筛选后频道', formatCount(value.stats.channels)],
-    ['候选线路', formatCount(value.stats.candidateStreams)],
-    ['按标记排除成人 / 停播', formatCount(value.stats.excludedUnsafeChannel)],
-    ['排除屏蔽频道', formatCount(value.stats.excludedBlockedChannel)],
-    ['排除不兼容线路', formatCount(value.stats.excludedBrowserIncompatible)],
-    ['跳过异常上游记录', formatCount(value.stats.discardedUpstreamRecords ?? 0)],
-    ['家庭允许列表排除线路', formatCount(value.stats.excludedFamilySafety ?? 0)],
-    ['目录生成时间', new Date(value.generatedAt).toLocaleString('zh-CN')]
-  ]
-  const fragment = document.createDocumentFragment()
-  for (const [term, detail] of rows) {
-    const dt = document.createElement('dt')
-    const dd = document.createElement('dd')
-    dt.textContent = term
-    dd.textContent = detail
-    fragment.append(dt, dd)
-  }
-  elements.catalogStats.replaceChildren(fragment)
-}
-
 function showCatalogFailure(failure: CatalogLoadFailure): void {
   catalogSyncActive = false
   catalog = undefined
+  catalogRequests.clear()
   delete elements.app.dataset.catalogSource
   delete elements.app.dataset.catalogCount
-  filteredChannels = []
+  channelList.clear()
   player.stop()
-  elements.loadingList.hidden = true
-  elements.channelWindow.replaceChildren()
-  elements.channelWindow.hidden = true
-  elements.channelSpacer.hidden = true
-  setCatalogControlsEnabled(false)
-  setCatalogFailureVisible(true)
-  elements.catalogFailure.dataset.errorCode = failure.code
-  elements.catalogFailureTitle.textContent = failure.title
-  elements.catalogFailureMessage.textContent = failure.message
-  elements.catalogDiagnostics.textContent = [
-    `错误类别：${failure.code}`,
-    `可重试：${failure.retryable ? '是' : '否'}`,
-    `诊断：${failure.detail || '没有更多诊断信息'}`
-  ].join('\n')
-  elements.catalogDiagnostics.hidden = true
-  elements.toggleCatalogDiagnostics.setAttribute('aria-expanded', 'false')
-  elements.toggleCatalogDiagnostics.textContent = '查看诊断信息'
-  elements.catalogState.textContent = '无法获取 iptv-org 目录'
-  elements.catalogState.classList.add('warning')
-  elements.resultCount.textContent = '未载入真实频道'
+  catalogStatus.showFailure(failure)
   showToast(`${failure.title}，可以重新尝试或主动打开离线演示`, 7000)
 }
 
 function beginCatalogSync(message: string): void {
   catalogSyncActive = true
-  setCatalogFailureVisible(false)
-  elements.catalogState.classList.remove('warning')
-  elements.catalogState.textContent = message
-  if (!catalog) {
-    elements.channelWindow.hidden = true
-    elements.channelSpacer.hidden = true
-    elements.loadingList.hidden = false
-    elements.resultCount.textContent = message
-  }
+  catalogStatus.begin(message, Boolean(catalog))
 }
 
 function updateCatalogProgress(progress: CatalogSyncProgress): void {
-  if (!catalogSyncActive) return
-  elements.catalogState.dataset.syncStage = progress.stage
-  elements.catalogState.textContent = progress.message
-  if (!catalog) elements.resultCount.textContent = progress.message
-}
-
-function setCatalogFailureVisible(visible: boolean): void {
-  elements.catalogFailure.hidden = !visible
-  if (!visible) delete elements.catalogFailure.dataset.errorCode
-  elements.channelWindow.hidden = visible
-  elements.channelSpacer.hidden = visible
-}
-
-function setCatalogControlsEnabled(enabled: boolean): void {
-  elements.search.disabled = !enabled
-  elements.country.disabled = !enabled
-  elements.category.disabled = !enabled
-  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')) button.disabled = !enabled
-}
-
-function toggleCatalogDiagnostics(): void {
-  const expanded = elements.toggleCatalogDiagnostics.getAttribute('aria-expanded') === 'true'
-  elements.toggleCatalogDiagnostics.setAttribute('aria-expanded', String(!expanded))
-  elements.toggleCatalogDiagnostics.textContent = expanded ? '查看诊断信息' : '隐藏诊断信息'
-  elements.catalogDiagnostics.hidden = expanded
+  if (!catalogSyncActive || !catalogRequests.acceptsProgress(progress)) return
+  catalogStatus.progress(progress, Boolean(catalog))
 }
 
 async function openOfflineDemo(): Promise<void> {
   if (refreshInProgress) return
+  const generation = catalogRequests.begin()
   refreshInProgress = true
   elements.retryCatalog.disabled = true
   elements.openOfflineDemo.disabled = true
@@ -1220,15 +888,18 @@ async function openOfflineDemo(): Promise<void> {
   beginCatalogSync('正在打开离线演示…')
   try {
     const result = await window.tvFeed.loadOfflineDemo()
+    if (!catalogRequests.isCurrent(generation)) return
     applyCatalog(result)
     showToast('已打开离线演示；这些是虚构样例，不是 iptv-org 真实频道')
   } catch (error) {
-    showCatalogFailure(unexpectedCatalogFailure(error))
+    if (catalogRequests.isCurrent(generation)) showCatalogFailure(unexpectedCatalogFailure(error))
   } finally {
-    refreshInProgress = false
-    elements.retryCatalog.disabled = false
-    elements.openOfflineDemo.disabled = false
-    elements.refreshCatalog.disabled = false
+    if (catalogRequests.isCurrent(generation)) {
+      refreshInProgress = false
+      elements.retryCatalog.disabled = false
+      elements.openOfflineDemo.disabled = false
+      elements.refreshCatalog.disabled = false
+    }
   }
 }
 
@@ -1243,7 +914,7 @@ function unexpectedCatalogFailure(error: unknown): CatalogLoadFailure {
 }
 
 function getChannel(channelId: string): CatalogChannel | undefined {
-  return catalog?.channels.find((channel) => channel.id === channelId)
+  return catalogRequests.channel(channelId)
 }
 
 function sourceLabel(source: CatalogSource, index: number): string {
@@ -1291,45 +962,6 @@ function clearPlaybackDiagnostic(): void {
   elements.playbackDiagnostic.replaceChildren()
 }
 
-function queueChannelNumber(digit: string): void {
-  const next = appendChannelNumberDigit(channelNumberBuffer, digit, filteredChannels.length)
-  if (!next) {
-    announce('频道编号从 1 开始')
-    return
-  }
-  channelNumberBuffer = next
-  announce(`频道编号 ${channelNumberBuffer}`)
-
-  if (channelNumberTimer !== undefined) window.clearTimeout(channelNumberTimer)
-  if (!hasLongerChannelNumber(channelNumberBuffer, filteredChannels.length)) {
-    commitChannelNumber()
-    return
-  }
-  channelNumberTimer = window.setTimeout(commitChannelNumber, CHANNEL_NUMBER_COMMIT_DELAY_MS)
-}
-
-function commitChannelNumber(): void {
-  if (channelNumberTimer !== undefined) window.clearTimeout(channelNumberTimer)
-  channelNumberTimer = undefined
-  const value = channelNumberBuffer
-  channelNumberBuffer = ''
-  const index = channelIndexForNumber(value, filteredChannels.length)
-  const channel = index === undefined ? undefined : filteredChannels[index]
-  if (!channel || index === undefined) {
-    announce(`没有频道编号 ${value}`)
-    showToast(`没有频道编号 ${value}`)
-    return
-  }
-  selectChannel(channel.id, true, true)
-  ensureChannelVisible(index)
-}
-
-function resetChannelNumberBuffer(): void {
-  channelNumberBuffer = ''
-  if (channelNumberTimer !== undefined) window.clearTimeout(channelNumberTimer)
-  channelNumberTimer = undefined
-}
-
 function announceVolume(state: Readonly<{ muted: boolean; percent: number }>): void {
   const message = state.muted ? '已静音' : `音量 ${state.percent}%`
   announce(message)
@@ -1346,8 +978,12 @@ function announce(message: string): void {
 }
 
 function emptyMessage(): string {
-  if (viewMode === 'favorites') return '还没有收藏频道。打开任一频道后，点击右侧的收藏按钮。'
-  if (viewMode === 'recent') return '最近观看为空。播放过的频道会自动出现在这里。'
+  if (viewMode === 'favorites') return viewing.favorites.size > 0
+    ? '当前目录或筛选条件下没有可显示的收藏。已保存的收藏仍然保留，可以更新目录或清除筛选后再查看。'
+    : '还没有收藏频道。打开任一频道后，点击右侧的收藏按钮。'
+  if (viewMode === 'recent') return viewing.recents.length > 0
+    ? '当前目录或筛选条件下没有可显示的观看记录。已保存的记录仍然保留。'
+    : '最近观看为空。播放过的频道会自动出现在这里。'
   return '没有找到符合条件的频道，请换个关键词或清除筛选。'
 }
 
@@ -1378,24 +1014,12 @@ function required<T extends Element>(selector: string): T {
   return element
 }
 
-function readStoredSourceHealth() {
-  try {
-    return parseSourceHealthStore(localStorage.getItem(SOURCE_HEALTH_KEY))
-  } catch {
-    return new Map()
-  }
-}
-
 function formatCount(value: number): string {
   return new Intl.NumberFormat('zh-CN').format(value)
 }
 
 function initials(value: string): string {
   return value.replace(/[^\p{L}\p{N}]/gu, '').slice(0, 2).toLocaleUpperCase() || 'TV'
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, value))
 }
 
 function errorMessage(error: unknown): string {

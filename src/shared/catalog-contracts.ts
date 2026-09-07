@@ -120,6 +120,7 @@ export type CatalogScope = 'standard' | 'family'
 export type CatalogLoadIntent = 'startup' | 'refresh'
 
 export interface CatalogLoadCommand {
+  requestId?: string
   intent: CatalogLoadIntent
 }
 
@@ -150,6 +151,7 @@ export interface CatalogSyncProgressUpdate {
 
 export interface CatalogSyncProgress extends CatalogSyncProgressUpdate {
   operationId: string
+  requestId?: string
 }
 
 export type CatalogFailureCode =

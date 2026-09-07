@@ -27,6 +27,7 @@ test('首次迁移把家庭安全写入主进程权威状态，再清缓存并�
     store,
     now: () => 42,
     invalidateCatalog: async () => { invalidations += 1; return true },
+    revokePlayback: () => undefined,
     cancelRemoteLogos: () => { logoCancellations += 1 }
   })
 
@@ -49,12 +50,17 @@ test('启用家庭安全时先持久化限制状态，再等待可能阻塞的�
   const store = new MemorySafetyStore()
   const gate = deferred<void>()
   let invalidationStarted = false
+  let playbackRevoked = false
   const coordinator = new SafetyCoordinator({
     store,
     invalidateCatalog: async () => {
       invalidationStarted = true
       await gate.promise
       return true
+    },
+    revokePlayback: () => {
+      assert.equal(store.state?.familySafety, true)
+      playbackRevoked = true
     },
     cancelRemoteLogos: () => undefined
   })
@@ -65,6 +71,7 @@ test('启用家庭安全时先持久化限制状态，再等待可能阻塞的�
   assert.equal(store.state?.familySafety, true)
   assert.equal(store.state?.remoteLogos, false)
   assert.equal(store.state?.pendingCatalogInvalidation, true)
+  assert.equal(playbackRevoked, true)
   assert.throws(() => coordinator.assertRemoteResourceAllowed('logo'), /家庭安全模式/)
   assert.throws(() => coordinator.assertCatalogScope('standard'), /安全范围已经改变/)
   gate.resolve()
@@ -85,6 +92,7 @@ test('崩溃遗留的缓存清理标记会在下次初始化重试，失败时�
   const failed = new SafetyCoordinator({
     store,
     invalidateCatalog: async () => { throw new Error('磁盘忙') },
+    revokePlayback: () => undefined,
     cancelRemoteLogos: () => undefined
   })
   const stillPending = await failed.initialize({ familySafety: false, remoteLogos: false })
@@ -95,6 +103,7 @@ test('崩溃遗留的缓存清理标记会在下次初始化重试，失败时�
   const recovered = new SafetyCoordinator({
     store,
     invalidateCatalog: async () => true,
+    revokePlayback: () => undefined,
     cancelRemoteLogos: () => undefined
   })
   const state = await recovered.initialize({ familySafety: false, remoteLogos: false })

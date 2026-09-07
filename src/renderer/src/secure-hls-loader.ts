@@ -30,8 +30,11 @@ export class SecureHlsLoader implements Loader<LoaderContext> {
   private completed = false
   private contentType = ''
   private responseHeaders = new Map<string, string>()
+  private readonly playbackSessionId: string
 
-  constructor(_config: HlsConfig) {}
+  constructor(_config: HlsConfig, playbackSessionId = '') {
+    this.playbackSessionId = playbackSessionId
+  }
 
   load(
     context: LoaderContext,
@@ -65,6 +68,7 @@ export class SecureHlsLoader implements Loader<LoaderContext> {
       requestId: this.requestId,
       url: context.url,
       kind: resourceKind(context),
+      ...(this.playbackSessionId ? { playbackSessionId: this.playbackSessionId } : {}),
       ...range
     } as const
     if (request.kind === 'hls-binary') {

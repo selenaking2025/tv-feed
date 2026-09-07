@@ -41,6 +41,7 @@ type ProgressReporter = (progress: CatalogSyncProgress) => void
 
 interface RunningOperation {
   operationId: string
+  cacheEpoch: number
   reporters: Set<ProgressReporter>
   latestProgress?: CatalogSyncProgress
   promise: Promise<CatalogLoadResult>
@@ -58,6 +59,7 @@ export class CatalogCoordinator {
   private readonly now: () => number
   private readonly cacheTtlMs: number
   private readonly inFlight = new Map<string, RunningOperation>()
+  private readonly acceptedCatalogs = new Map<CatalogScope, { sequence: number; catalog: Catalog }>()
   private operationSequence = 0
   private cacheEpoch = 0
   private latestCommittedSequence = 0
@@ -82,7 +84,7 @@ export class CatalogCoordinator {
     const joinable = command.intent === 'startup'
       ? this.inFlight.get(refreshKey) ?? this.inFlight.get(ownKey)
       : this.inFlight.get(ownKey)
-    if (joinable) {
+    if (joinable && joinable.cacheEpoch === this.cacheEpoch) {
       joinable.reporters.add(report)
       if (joinable.latestProgress) safelyReport(report, joinable.latestProgress)
       return joinable.promise
@@ -93,6 +95,7 @@ export class CatalogCoordinator {
     const reporters = new Set<ProgressReporter>([report])
     const running: RunningOperation = {
       operationId,
+      cacheEpoch: this.cacheEpoch,
       reporters,
       promise: Promise.resolve(undefined as never)
     }
@@ -101,6 +104,11 @@ export class CatalogCoordinator {
       const progress: CatalogSyncProgress = { operationId, ...update }
       running.latestProgress = progress
       for (const listener of running.reporters) safelyReport(listener, progress)
+    }).then((result) => {
+      // Cache clearing revokes disk writes, not the usable in-memory result.
+      // The sequence still prevents an older result replacing a newer catalog.
+      this.acceptCatalog(scope, sequence, result.catalog)
+      return result
     }).finally(() => {
       if (this.inFlight.get(ownKey) === running) this.inFlight.delete(ownKey)
     })
@@ -110,11 +118,26 @@ export class CatalogCoordinator {
 
   loadOfflineDemo(scope: CatalogScope): CatalogLoadResult {
     const catalog = projectCatalog(createOfflineSampleCatalog(), scope)
+    const sequence = ++this.operationSequence
+    this.acceptCatalog(scope, sequence, catalog)
     return {
-      operationId: `offline-${(++this.operationSequence).toString(36)}-${this.now().toString(36)}`,
+      operationId: `offline-${sequence.toString(36)}-${this.now().toString(36)}`,
       catalog,
       cacheStatus: 'offline-sample',
       warning: '离线演示模式：这是 8 个内置虚构样例，不是 iptv-org 真实频道目录。'
+    }
+  }
+
+  playbackSource(scope: CatalogScope, channelId: string, sourceId: string): { url: string } {
+    const channel = this.acceptedCatalogs.get(scope)?.catalog.channels.find((entry) => entry.id === channelId)
+    const source = channel?.sources.find((entry) => entry.id === sourceId)
+    if (!source) throw new Error('当前安全目录中没有这条频道线路，请重新选择频道')
+    return { url: source.url }
+  }
+
+  private acceptCatalog(scope: CatalogScope, sequence: number, catalog: Catalog): void {
+    if (sequence >= (this.acceptedCatalogs.get(scope)?.sequence ?? 0)) {
+      this.acceptedCatalogs.set(scope, { sequence, catalog })
     }
   }
 

@@ -14,6 +14,7 @@ import type {
   SafetyStateSnapshot,
   SafetyTransitionResult
 } from './safety-contracts.ts'
+import type { PlaybackSession, PlaybackStartCommand } from './playback-contracts.ts'
 
 export const APP_PROTOCOL = Object.freeze({
   scheme: 'tvfeed',
@@ -33,6 +34,8 @@ export const IPC_CHANNELS = Object.freeze({
   remoteFetch: 'remote-resource:fetch',
   remotePrepareStream: 'remote-resource:prepare-stream',
   remoteCancel: 'remote-resource:cancel',
+  playbackStart: 'playback:start',
+  playbackEnd: 'playback:end',
   networkStatus: 'network:status',
   appVersion: 'app:version',
   playerSetFullscreen: 'player-fullscreen:set',
@@ -53,6 +56,8 @@ export interface TvFeedBridge {
   fetchRemoteResource(request: RemoteResourceRequest): Promise<RemoteResourceFetchResult>
   prepareRemoteResourceStream(request: RemoteResourceRequest): Promise<RemoteResourceStreamTicket>
   cancelRemoteResource(requestId: string): void
+  startPlayback(command: PlaybackStartCommand): Promise<PlaybackSession>
+  endPlayback(sessionId: string): void
   isNetworkOnline(): Promise<boolean>
   getAppVersion(): Promise<string>
   setPlayerFullscreen(fullscreen: boolean): Promise<boolean>
@@ -65,7 +70,11 @@ export function parseCatalogLoadCommand(value: unknown): CatalogLoadCommand {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('目录加载命令格式无效')
   const intent = (value as Record<string, unknown>).intent
   if (intent !== 'startup' && intent !== 'refresh') throw new Error('目录加载意图无效')
-  return { intent }
+  const requestId = (value as Record<string, unknown>).requestId
+  if (requestId !== undefined && (typeof requestId !== 'string' || !/^[A-Za-z0-9:_-]{1,128}$/.test(requestId))) {
+    throw new Error('目录请求标识无效')
+  }
+  return { intent, ...(typeof requestId === 'string' ? { requestId } : {}) }
 }
 
 export function parseLegacySafetyPreferences(value: unknown): LegacySafetyPreferences {

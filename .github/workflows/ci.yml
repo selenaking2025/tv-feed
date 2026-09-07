@@ -51,7 +51,7 @@ jobs:
         run: npm test
 
       - name: Build Electron application
-        run: npm run build
+        run: npm run build:app
 
       - name: Launch Electron and verify the renderer
         run: xvfb-run --auto-servernum npm run smoke
@@ -63,3 +63,56 @@ jobs:
 
       - name: Verify deterministic MPEG-TS playback A/B
         run: xvfb-run --auto-servernum npm run verify:hls:mpeg-ts
+
+      - name: Verify cross-process regressions and continuous playback
+        run: xvfb-run --auto-servernum npm run verify:regressions
+
+  macos:
+    name: Native macOS regression and packaged launch
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.9.0
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install exact dependencies
+        run: npm ci --registry=https://registry.npmjs.org
+
+      - name: Type-check, test, and build
+        run: npm run build
+
+      - name: Ensure generated playback fixture support
+        run: |
+          if ! command -v ffmpeg; then
+            brew install ffmpeg
+          fi
+
+      - name: Verify native cross-process regressions and continuous playback
+        run: npm run verify:regressions
+
+      - name: Verify family mode
+        run: npm run smoke
+        env:
+          TVFEED_SMOKE_FAMILY: '1'
+
+      - name: Verify narrow-window drawer controls
+        run: npm run smoke
+        env:
+          TVFEED_SMOKE_WIDTH: '960'
+          TVFEED_SMOKE_HEIGHT: '760'
+
+      - name: Package the already validated application
+        run: npx --no-install electron-builder --mac dir --arm64 --publish never
+
+      - name: Launch the packaged application
+        run: npm run smoke
+        env:
+          TVFEED_ELECTRON_PATH: '${{ github.workspace }}/release/mac-arm64/TV Feed.app/Contents/MacOS/TV Feed'
+          TVFEED_EXPECT_PACKAGED: '1'

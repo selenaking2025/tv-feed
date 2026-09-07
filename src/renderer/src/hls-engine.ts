@@ -1,6 +1,7 @@
 import Hls from 'hls.js'
 import { SecureHlsLoader } from './secure-hls-loader.ts'
 
+export { Hls }
 export type HlsProgressiveMode = 'production-forced' | 'library-default'
 
 /**
@@ -9,9 +10,13 @@ export type HlsProgressiveMode = 'production-forced' | 'library-default'
  * override until repeatable evidence identifies a stream characteristic that
  * fails under this mode and passes under the library default.
  */
-export function createSecureHls(mode: HlsProgressiveMode = 'production-forced'): Hls {
+export function createSecureHls(mode: HlsProgressiveMode = 'production-forced', playbackSessionId = ''): Hls {
   const hls = new Hls({
-    loader: SecureHlsLoader,
+    loader: class extends SecureHlsLoader {
+      constructor(config: ConstructorParameters<typeof SecureHlsLoader>[0]) {
+        super(config, playbackSessionId)
+      }
+    },
     enableWorker: true,
     lowLatencyMode: false,
     backBufferLength: 20,

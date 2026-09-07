@@ -1,5 +1,6 @@
 import { BrowserWindow, ipcMain, type WebContents } from 'electron'
 import { IPC_CHANNELS, parseCatalogLoadCommand, parseLegacySafetyPreferences } from '../shared/ipc-contract.ts'
+import { parsePlaybackStartCommand } from '../shared/playback-contracts.ts'
 import type { CatalogLoadResponse } from '../shared/catalog-contracts.ts'
 import { assertTrustedSender } from './app-protocol.ts'
 import type { CatalogCoordinator } from './catalog-coordinator.ts'
@@ -47,11 +48,15 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
     trust(event.senderFrame?.url ?? '')
     try {
       const scope = options.safety.catalogScope()
+      const command = parseCatalogLoadCommand(input)
       const result = await options.catalog.load(
-        parseCatalogLoadCommand(input),
+        command,
         scope,
         (progress) => {
-          if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.catalogProgress, progress)
+          if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.catalogProgress, {
+            ...progress,
+            ...(command.requestId ? { requestId: command.requestId } : {})
+          })
         }
       )
       // Never return a standard projection after family mode became
@@ -75,6 +80,16 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
   ipcMain.handle(IPC_CHANNELS.remoteFetch, (event, input: unknown) => {
     trust(event.senderFrame?.url ?? '')
     return options.resources.fetch(event.sender.id, input)
+  })
+  ipcMain.handle(IPC_CHANNELS.playbackStart, (event, input: unknown) => {
+    trust(event.senderFrame?.url ?? '')
+    const command = parsePlaybackStartCommand(input)
+    const source = options.catalog.playbackSource(options.safety.catalogScope(), command.channelId, command.sourceId)
+    return options.resources.startPlayback(event.sender.id, source.url)
+  })
+  ipcMain.on(IPC_CHANNELS.playbackEnd, (event, sessionId: unknown) => {
+    trust(event.senderFrame?.url ?? '')
+    if (typeof sessionId === 'string') options.resources.endPlayback(event.sender.id, sessionId)
   })
   ipcMain.handle(IPC_CHANNELS.remotePrepareStream, (event, input: unknown) => {
     trust(event.senderFrame?.url ?? '')
