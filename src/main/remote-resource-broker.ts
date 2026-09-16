@@ -295,7 +295,7 @@ export class RemoteResourceBroker {
     try {
       const expectedOrigin = new URL(this.options.rendererUrl).origin
       const origin = request.headers.get('origin')
-      if (origin === expectedOrigin) return true
+      if (origin !== null) return origin === expectedOrigin
       return Boolean(request.referrer && new URL(request.referrer).origin === expectedOrigin)
     } catch {
       return false
@@ -306,7 +306,7 @@ export class RemoteResourceBroker {
     if (!this.options.rendererUrl) return {}
     try {
       const expectedOrigin = new URL(this.options.rendererUrl).origin
-      return request.headers.get('origin') === expectedOrigin
+      return this.isTrustedStreamRequest(request)
         ? { 'Access-Control-Allow-Origin': expectedOrigin, Vary: 'Origin' }
         : {}
     } catch {

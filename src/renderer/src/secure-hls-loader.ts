@@ -165,7 +165,9 @@ export class SecureHlsLoader implements Loader<LoaderContext> {
         credentials: 'omit',
         cache: 'no-store',
         redirect: 'error',
-        referrerPolicy: 'no-referrer',
+        // Electron's custom protocol handler omits the Origin header. Retain
+        // only our page origin so the local media bridge can verify its caller.
+        referrerPolicy: 'origin',
         signal: controller.signal
       })
       if (!response.ok) {

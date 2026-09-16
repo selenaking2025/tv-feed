@@ -227,10 +227,14 @@ if (playbackRequested && !checks.playbackCheck?.passed) {
 }
 if (
   playbackRequested &&
+  checks.catalogSource !== 'offline-sample' &&
   playbackObservationMs >= 15_000 &&
   (!checks.sourceHealthSummary?.present || checks.sourceHealthSummary.records < 1 || checks.sourceHealthSummary.containsUrl)
 ) {
   throw new Error(`线路稳定记录未通过：${JSON.stringify(checks.sourceHealthSummary)}`)
+}
+if (checks.catalogSource === 'offline-sample' && checks.sourceHealthSummary?.present) {
+  throw new Error('离线演示不应把线路稳定记录写入真实观看数据')
 }
 if (liveCatalog && !checks.officialSourceMarkingCheck?.passed) {
   throw new Error(`官方源标记验收失败：${JSON.stringify(checks.officialSourceMarkingCheck)}`)

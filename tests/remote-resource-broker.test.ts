@@ -3,6 +3,52 @@ import test from 'node:test'
 import { RemoteResourceBroker } from '../src/main/remote-resource-broker.ts'
 import { REMOTE_RESOURCE_FAILURE_HEADER } from '../src/shared/remote-resource-contracts.ts'
 
+test('开发页面的媒体流在 Electron 仅保留 referrer 时仍能读取，未知来源不能消费票据', async () => {
+  const origin = 'http://localhost:5173'
+  let opened = 0
+  const broker = new RemoteResourceBroker({
+    assertAllowed: () => undefined,
+    isNetworkOnline: () => true,
+    rendererUrl: `${origin}/`
+  }, {
+    streamResource: async () => {
+      opened += 1
+      return {
+        statusCode: 200, contentType: 'video/mp2t', contentLength: 3, finalUrl: 'https://media.example/segment.ts',
+        contentRange: '', acceptRanges: '', connectionReused: false,
+        body: (async function* () { yield Uint8Array.from([1, 2, 3]) })()
+      }
+    }
+  })
+  try {
+    const session = broker.startPlayback(1, 'https://media.example/live.m3u8')
+    const ticket = broker.prepareStream(1, {
+      requestId: 'development-segment', kind: 'hls-binary',
+      url: 'https://media.example/segment.ts', playbackSessionId: session.sessionId
+    })
+    const url = new URL(ticket.streamUrl)
+    for (const init of [
+      {},
+      { referrer: 'http://localhost:5174/' },
+      { headers: { Origin: 'https://untrusted.example' }, referrer: `${origin}/` }
+    ]) {
+      const rejected = await broker.handleStreamRequest(new Request(url, init), url)
+      assert.equal(rejected.status, 403)
+      assert.equal(rejected.headers.get('Access-Control-Allow-Origin'), null)
+    }
+    assert.equal(opened, 0)
+    const request = new Request(url, { referrer: `${origin}/` })
+    const response = await broker.handleStreamRequest(request, url)
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'), origin)
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), Uint8Array.from([1, 2, 3]))
+    assert.equal(opened, 1)
+    assert.equal((await broker.handleStreamRequest(request, url)).status, 404)
+  } finally {
+    broker.dispose()
+  }
+})
+
 test('缓冲资源失败通过固定信封返回，不把底层 DNS 文字跨进程抛出', async () => {
   const broker = new RemoteResourceBroker({
     assertAllowed: () => undefined,

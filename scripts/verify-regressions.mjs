@@ -4,12 +4,14 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { build } from 'vite'
+import { build, preview } from 'vite'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const require = createRequire(import.meta.url)
 const temporary = await mkdtemp(join(tmpdir(), 'tv-feed-regressions-'))
 const behaviorOnly = process.argv.includes('--behavior-only')
+const development = process.argv.includes('--development')
+let previewServer
 
 try {
   const media = join(temporary, 'media')
@@ -36,16 +38,27 @@ try {
     }
   })
   await symlink(join(root, 'out/renderer'), join(temporary, 'renderer'), 'dir')
+  if (development) {
+    previewServer = await preview({
+      configFile: false, root, logLevel: 'error',
+      build: { outDir: 'out/renderer' },
+      preview: { host: '127.0.0.1', port: 0 }
+    })
+  }
+  const rendererUrl = previewServer?.resolvedUrls?.local[0] ?? ''
+  if (development && !rendererUrl) throw new Error('开发模式验收服务器未返回可用地址')
   const output = await run(require('electron'), [join(temporary, 'main/index.mjs')], 220_000, {
     TVFEED_REGRESSION_ROOT: temporary,
     TVFEED_REGRESSION_PRELOAD: join(root, 'out/preload/index.cjs'),
-    TVFEED_REGRESSION_BEHAVIOR_ONLY: behaviorOnly ? '1' : '0'
+    TVFEED_REGRESSION_BEHAVIOR_ONLY: behaviorOnly ? '1' : '0',
+    TVFEED_REGRESSION_RENDERER_URL: rendererUrl
   })
   const line = output.split('\n').find((value) => value.startsWith('TVFEED_REGRESSION_RESULT '))
   if (!line || JSON.parse(line.slice('TVFEED_REGRESSION_RESULT '.length)).ok !== true) {
     throw new Error('Electron 未返回完整回归验收结果')
   }
 } finally {
+  if (previewServer) await new Promise((resolveClose) => previewServer.httpServer.close(resolveClose))
   await rm(temporary, { recursive: true, force: true })
 }
 

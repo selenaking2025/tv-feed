@@ -31,7 +31,7 @@ let fetches = 0
 let fetchNext: (report: (update: CatalogSyncProgressUpdate) => void) => Promise<CatalogFetchResult> = async () => {
   throw new SecureNetworkError('network', 'Fixture unavailable', false)
 }
-const runtime = readRuntimeConfig({})
+const runtime = readRuntimeConfig({ ELECTRON_RENDERER_URL: process.env.TVFEED_REGRESSION_RENDERER_URL ?? '' })
 const cacheWrites: Catalog[] = []
 const catalog = new CatalogCoordinator({
   cache: {
@@ -90,7 +90,7 @@ void app.whenReady().then(async () => {
   })
   resources = new RemoteResourceBroker({
     assertAllowed: (kind) => safety.assertRemoteResourceAllowed(kind),
-    isNetworkOnline: () => networkOnline, rendererUrl: ''
+    isNetworkOnline: () => networkOnline, rendererUrl: runtime.rendererUrl
   }, {
     fetchResource: (input, signal) => fetchRemoteResource(input, signal, (url, options) => fetchBoundedHttps(url, options, transport)),
     streamResource: (input, signal) => streamRemoteResource(input, signal, (url, options) => streamBoundedHttps(url, options, transport))
@@ -293,7 +293,7 @@ function bundle(label: string): CatalogFetchResult {
 }
 
 async function reload(): Promise<void> {
-  await window.loadURL('tvfeed://app/')
+  await window.loadURL(runtime.rendererUrl || 'tvfeed://app/')
   await waitFor('Boolean(window.tvFeed && document.querySelector("#app-shell"))')
 }
 

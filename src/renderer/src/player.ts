@@ -15,6 +15,7 @@ import { decideStallRecovery } from '../../shared/playback-stability.ts'
 
 const AUTOPLAY_BUFFER_TARGET_SECONDS = 5
 const AUTOPLAY_BUFFER_MAX_WAIT_MS = 8_000
+const PLAYBACK_START_TIMEOUT_MS = 30_000
 const STALL_RECOVERY_WINDOW_MS = 8_000
 
 export type PlaybackState = 'idle' | 'loading' | 'playing' | 'paused' | 'waiting-network' | 'error'
@@ -41,6 +42,7 @@ export class StreamPlayer {
   private stopping = false
   private metricsTimer: number | undefined
   private stallWatchdogTimer: number | undefined
+  private startupWatchdogTimer: number | undefined
   private loadGeneration = 0
   private stallRecoveryAttempted = false
   private metricsStartedAt = 0
@@ -108,6 +110,7 @@ export class StreamPlayer {
     this.stallRecoveryAttempted = false
     this.beginMetrics()
     this.callbacks.onState('loading', '正在连接直播线路…')
+    if (autoplay) this.scheduleStartupWatchdog()
     void this.connect(source, channelId, this.loadGeneration)
   }
 
@@ -157,12 +160,14 @@ export class StreamPlayer {
     this.shouldAutoplay = false
     const generation = this.loadGeneration
     if (this.video.paused) {
+      this.scheduleStartupWatchdog()
       try {
         await this.video.play()
       } catch (error) {
         if (generation === this.loadGeneration) this.reportPlayRejection(error, 'manual')
       }
     } else {
+      this.clearStartupWatchdog()
       this.video.pause()
     }
   }
@@ -215,6 +220,7 @@ export class StreamPlayer {
   }
 
   private reportPlayRejection(error: unknown, phase: 'manual' | 'deferred'): void {
+    this.clearStartupWatchdog()
     const rejection = classifyPlaybackStartRejection(error)
     console.warn(`TVFEED_PLAY_REJECTED phase=${phase} code=${rejection.code}`)
     this.callbacks.onState('paused', rejection.message)
@@ -226,6 +232,7 @@ export class StreamPlayer {
     const diagnostic = classifyPlaybackDiagnostic(...inputs)
     this.loadGeneration += 1
     this.shouldAutoplay = false
+    this.clearStartupWatchdog()
     this.finishStall()
     this.stopMetricsTimer()
     this.emitMetrics()
@@ -240,6 +247,7 @@ export class StreamPlayer {
   private releaseMedia(): void {
     this.loadGeneration += 1
     this.stopping = true
+    this.clearStartupWatchdog()
     this.finishStall()
     this.stopMetricsTimer()
     this.hls?.destroy()
@@ -263,6 +271,7 @@ export class StreamPlayer {
   private bindVideoEvents(): void {
     this.video.addEventListener('playing', () => {
       if (this.stopping || !this.currentSource) return
+      this.clearStartupWatchdog()
       if (this.firstPlayingAt === 0) {
         this.firstPlayingAt = performance.now()
       }
@@ -303,6 +312,21 @@ export class StreamPlayer {
     this.metricsStartedAt = performance.now()
     this.metricsTimer = window.setInterval(() => this.emitMetrics(), 500)
     this.emitMetrics()
+  }
+
+  private scheduleStartupWatchdog(): void {
+    if (this.firstPlayingAt > 0 || this.startupWatchdogTimer !== undefined) return
+    const generation = this.loadGeneration
+    this.startupWatchdogTimer = window.setTimeout(() => {
+      this.startupWatchdogTimer = undefined
+      if (generation !== this.loadGeneration || !this.currentSource || this.firstPlayingAt > 0) return
+      this.fail('直播线路起播超时，未能收到可播放的首帧')
+    }, PLAYBACK_START_TIMEOUT_MS)
+  }
+
+  private clearStartupWatchdog(): void {
+    if (this.startupWatchdogTimer !== undefined) window.clearTimeout(this.startupWatchdogTimer)
+    this.startupWatchdogTimer = undefined
   }
 
   private resetMetrics(): void {
