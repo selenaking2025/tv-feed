@@ -38,6 +38,7 @@ export const IPC_CHANNELS = Object.freeze({
   playbackEnd: 'playback:end',
   networkStatus: 'network:status',
   appVersion: 'app:version',
+  appWindowAction: 'app:window-action',
   playerSetFullscreen: 'player-fullscreen:set',
   playerFullscreenChanged: 'player-fullscreen:changed',
   rendererReady: 'renderer:ready'
@@ -60,6 +61,7 @@ export interface TvFeedBridge {
   endPlayback(sessionId: string): void
   isNetworkOnline(): Promise<boolean>
   getAppVersion(): Promise<string>
+  windowAction(action: 'minimize' | 'close'): Promise<void>
   setPlayerFullscreen(fullscreen: boolean): Promise<boolean>
   onPlayerFullscreenChange(listener: (fullscreen: boolean) => void): () => void
   signalRendererReady(): void

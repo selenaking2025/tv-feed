@@ -137,6 +137,7 @@ async function verifyDemoIsolation(): Promise<void> {
   const before = await storage()
   await click('#open-offline-demo')
   await waitFor('document.querySelector("#app-shell").dataset.catalogSource === "offline-sample"')
+  await verifyDeviceTuner()
   await click('#favorite-channel')
   await click('.channel-select')
   await waitFor('document.querySelector("#channel-health").dataset.state === "unavailable"')
@@ -159,6 +160,45 @@ async function verifyRetry(): Promise<void> {
   assert.equal(requests - before, 2, '手动重试必须恢复整轮线路尝试，不能沿用上一轮失败集合')
   results.fatalRetry = { passed: true, newRequests: requests - before }
   report('致命失败后的主播放按钮重试')
+}
+
+async function verifyDeviceTuner(): Promise<void> {
+  await click('#sidebar-close')
+  const title = await evaluate('document.querySelector("#channel-title").textContent')
+  const point = await evaluate(`(() => {
+    const r = document.querySelector('#channel-dial').getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  })()`) as { x: number; y: number }
+  const drag = (): void => {
+    window.webContents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 })
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: point.x, y: point.y - 28 })
+  }
+  const release = (): void => window.webContents.sendInputEvent({ type: 'mouseUp', x: point.x, y: point.y - 28, button: 'left', clickCount: 1 })
+  const before = requests
+  drag()
+  await waitFor('document.querySelector("#channel-dial").getAttribute("aria-valuenow") === "3"')
+  assert.equal(await evaluate('document.querySelector("#channel-title").textContent'), title, '旋钮拖动中不应提前切台')
+  assert.equal(requests, before, '旋钮预览不应发起播放请求')
+  await evaluate('document.querySelector("#channel-dial").dispatchEvent(new PointerEvent("pointercancel"))')
+  release()
+  assert.equal(await evaluate('document.querySelector("#channel-dial").getAttribute("aria-valuenow")'), '1')
+  drag()
+  await delay(40)
+  release()
+  await waitFor('document.querySelector("#channel-title").textContent === "Demo News Japan"')
+  await waitFor('document.querySelector("#channel-health").dataset.state === "unavailable"')
+  assert.equal(requests - before, 1, '松开换台旋钮只能提交一次频道选择')
+  await click('#stop-player')
+  await waitFor('document.querySelector("#app-shell").dataset.power === "off" && !document.querySelector("#player-empty").hidden')
+  await click('#stop-player')
+  await waitFor('document.querySelector("#app-shell").dataset.power === "on"')
+  await waitFor('document.querySelector("#channel-health").dataset.state === "unavailable"')
+  await click('#stop-player')
+  await evaluate(`document.querySelector('#channel-dial').dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }))`)
+  await waitFor('document.querySelector("#channel-dial").getAttribute("aria-valuenow") === "1"')
+  await click('#stop-player')
+  results.deviceTuner = { passed: true, previewWithoutRequests: true, cancelledDragRestored: true, singleCommit: true, powerToggle: true }
+  report('电视机旋钮拖动、取消、换台与电源开关')
 }
 
 async function verifyFamilyTransition(): Promise<void> {

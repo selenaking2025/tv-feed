@@ -4,7 +4,7 @@ import { hasVerifiedOfficialSource } from '../../shared/official-sources.ts'
 import type { ViewingState } from './viewing-state.ts'
 
 export type ViewMode = 'all' | 'chinese' | 'favorites' | 'recent'
-const ROW_HEIGHT = 76
+const ROW_HEIGHT = 64
 const OVERSCAN = 7
 const CHINESE_REGIONS = new Set(['CN', 'HK', 'TW', 'MO'])
 

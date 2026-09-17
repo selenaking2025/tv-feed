@@ -45,8 +45,8 @@ export function readRuntimeConfig(environment: NodeJS.ProcessEnv = process.env):
       diagnostic: enabled && environment.TVFEED_SMOKE_DIAGNOSTIC === '1',
       familySafety: enabled && environment.TVFEED_SMOKE_FAMILY === '1',
       playbackObservationMs: boundedNumber(environment.TVFEED_SMOKE_PLAY_OBSERVE_MS, 30_000, 10_000, 180_000),
-      windowWidth: boundedNumber(environment.TVFEED_SMOKE_WIDTH, 1_440, 820, 2_400),
-      windowHeight: boundedNumber(environment.TVFEED_SMOKE_HEIGHT, 900, 620, 1_600)
+      windowWidth: boundedNumber(environment.TVFEED_SMOKE_WIDTH, 980, 720, 2_400),
+      windowHeight: boundedNumber(environment.TVFEED_SMOKE_HEIGHT, 780, 580, 1_600)
     })
   })
 }

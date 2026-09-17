@@ -28,10 +28,10 @@ import { createKeyboardControls } from './keyboard-controls.ts'
 import { RemoteLogoController } from './remote-logo-controller.ts'
 import { SafetyClient } from './safety-client.ts'
 import { createChannelList, type ViewMode } from './channel-list.ts'
+import { createRotaryControl } from './rotary-control.ts'
 
 const NETWORK_RECOVERY_DELAY_MS = 3_000
 const NETWORK_RECOVERY_COOLDOWN_MS = 30_000
-const compactSidebarQuery = window.matchMedia('(max-width: 1040px)')
 
 const elements = {
   app: required<HTMLElement>('#app-shell'),
@@ -64,6 +64,15 @@ const elements = {
   playerStatusText: required<HTMLElement>('#player-status-text'),
   nowPlaying: required<HTMLElement>('#now-playing'),
   sourceQuality: required<HTMLElement>('#source-quality'),
+  channelDial: required<HTMLElement>('#channel-dial'),
+  channelNumber: required<HTMLOutputElement>('#channel-number'),
+  volumeDial: required<HTMLElement>('#volume-dial'),
+  volumeValue: required<HTMLOutputElement>('#volume-value'),
+  mute: required<HTMLButtonElement>('#mute-player'),
+  powerLabel: required<HTMLElement>('#power-label'),
+  sourcePanel: required<HTMLElement>('#source-panel'),
+  sourceToggle: required<HTMLButtonElement>('#source-toggle'),
+  sourceClose: required<HTMLButtonElement>('#source-close'),
   previous: required<HTMLButtonElement>('#previous-channel'),
   togglePlay: required<HTMLButtonElement>('#toggle-play'),
   next: required<HTMLButtonElement>('#next-channel'),
@@ -133,11 +142,29 @@ const channelList = createChannelList({
 })
 
 const keyboard = createKeyboardControls({
-  elements, compactSidebarQuery, channels: () => channelList.channels,
-  closeSidebar, toggleFullscreen, togglePictureInPicture, togglePlayback, moveChannel,
+  elements, openSidebar, channels: () => channelList.channels,
+  closeSidebar, closeSources, toggleFullscreen, togglePictureInPicture, togglePlayback, moveChannel,
   selectChannel, ensureChannelVisible, announce, showToast,
   onMute: () => announceVolume(player.toggleMuted()),
   onVolume: (delta) => announceVolume(player.adjustVolume(delta))
+})
+
+const channelDial = createRotaryControl({
+  element: elements.channelDial, minimum: 1, maximum: 0, value: 1, pixelsPerStep: 14,
+  deferred: true, angle: (value) => (value - 1) * 30 - 45,
+  describe: (value) => `第 ${value} 台，${channelList.channels[value - 1]?.name ?? '未选择'}`,
+  onPreview: (value) => { elements.channelNumber.value = channelList.channels.length ? String(value).padStart(2, '0') : '—' },
+  onChange: (value) => {
+    const channel = channelList.channels[value - 1]
+    if (channel) { selectChannel(channel.id, true, true); ensureChannelVisible(value - 1) }
+  }
+})
+const volumeDial = createRotaryControl({
+  element: elements.volumeDial, minimum: 0, maximum: 100, value: player.volumeState.percent, pixelsPerStep: 1.5,
+  angle: (value) => -135 + value * 2.7,
+  describe: (value) => `音量 ${value}%`,
+  onPreview: (value) => { elements.volumeValue.value = String(value).padStart(2, '0') },
+  onChange: (value) => { player.setVolume(value) }
 })
 
 function resetChannelNumberBuffer(): void { keyboard.resetNumber() }
@@ -183,6 +210,13 @@ function bindEvents(): void {
   elements.search.addEventListener('input', applyFilters)
   elements.country.addEventListener('change', applyFilters)
   elements.category.addEventListener('change', applyFilters)
+  const filterToggle = required<HTMLButtonElement>('#filter-toggle')
+  const filters = required<HTMLElement>('#channel-filters')
+  filterToggle.addEventListener('click', () => {
+    filters.hidden = !filters.hidden
+    filterToggle.setAttribute('aria-expanded', String(!filters.hidden))
+    renderVirtualRows()
+  })
 
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')) {
     button.addEventListener('click', () => setViewMode(button.dataset.view as ViewMode))
@@ -196,19 +230,41 @@ function bindEvents(): void {
   elements.previous.addEventListener('click', () => moveChannel(-1))
   elements.next.addEventListener('click', () => moveChannel(1))
   elements.togglePlay.addEventListener('click', () => void togglePlayback())
-  elements.stop.addEventListener('click', stopPlayback)
+  elements.stop.addEventListener('click', () => {
+    if (elements.app.dataset.power === 'on') stopPlayback()
+    else void togglePlayback()
+  })
+  elements.mute.addEventListener('click', () => announceVolume(player.toggleMuted()))
+  elements.video.addEventListener('volumechange', syncVolumeControl)
+  for (const action of ['minimize', 'close'] as const) {
+    required<HTMLButtonElement>(`#${action}-window`).addEventListener('click', () => {
+      void window.tvFeed.windowAction(action).catch(() => showToast('窗口操作未完成，请重试'))
+    })
+  }
   elements.favorite.addEventListener('click', () => toggleFavorite(selectedChannelId))
   elements.pip.addEventListener('click', () => void togglePictureInPicture())
   elements.fullscreen.addEventListener('click', () => void toggleFullscreen())
   window.tvFeed.onPlayerFullscreenChange(syncFullscreenControl)
 
-  elements.sidebarToggle.addEventListener('click', openSidebar)
+  elements.sidebarToggle.addEventListener('click', () => {
+    if (elements.app.classList.contains('sidebar-open')) closeSidebar()
+    else openSidebar()
+  })
   elements.sidebarClose.addEventListener('click', closeSidebar)
   elements.drawerScrim.addEventListener('click', closeSidebar)
-  compactSidebarQuery.addEventListener('change', resetSidebarForViewport)
+  elements.sourceToggle.addEventListener('click', toggleSources)
+  elements.sourceClose.addEventListener('click', () => closeSources())
 
-  elements.catalogInfo.addEventListener('click', () => elements.infoDialog.showModal())
+  elements.catalogInfo.addEventListener('click', () => {
+    closeSidebar()
+    closeSources()
+    syncSettingsBounds()
+    elements.infoDialog.showModal()
+  })
+  new ResizeObserver(syncSettingsBounds).observe(elements.playerStage)
+  window.addEventListener('resize', syncSettingsBounds)
   elements.dialogClose.addEventListener('click', () => elements.infoDialog.close())
+  elements.infoDialog.addEventListener('close', () => elements.catalogInfo.focus({ preventScroll: true }))
   elements.familySafetyToggle.addEventListener('change', () => void updateFamilySafetyPreference())
   elements.remoteLogoToggle.addEventListener('change', () => void updateRemoteLogoPreference())
   elements.clearCatalogCache.addEventListener('click', () => void clearCatalogCacheFromSettings())
@@ -221,6 +277,7 @@ function bindEvents(): void {
   window.addEventListener('online', () => void retryPendingNetworkPlayback('online'))
   syncSidebarState()
   syncFullscreenControl(false)
+  syncVolumeControl()
 }
 
 function applyCatalog(result: CatalogLoadResult): void {
@@ -289,7 +346,7 @@ async function refreshCatalog(): Promise<void> {
   }
 }
 
-function applyFilters(): void { channelList.applyFilters() }
+function applyFilters(): void { channelList.applyFilters(); syncChannelDial() }
 function renderVirtualRows(): void { channelList.render() }
 function ensureChannelVisible(index: number): void { channelList.ensureVisible(index) }
 
@@ -313,7 +370,8 @@ function selectChannel(channelId: string, autoplay: boolean, rememberRecent: boo
 
   const preferred = preferredSource(channel)
   if (autoplay && preferred) playSource(preferred.source, preferred.index)
-  if (window.innerWidth <= 1040 && autoplay) closeSidebar()
+  syncChannelDial()
+  if (autoplay) closeSidebar()
 }
 
 function renderChannelDetail(channel: CatalogChannel): void {
@@ -412,6 +470,7 @@ async function updateFamilySafetyPreference(): Promise<void> {
   catalog = undefined
   catalogRequests.clear()
   channelList.clear()
+  syncChannelDial()
   delete elements.app.dataset.catalogSource
   delete elements.app.dataset.catalogCount
   elements.channelTitle.textContent = '正在切换频道目录…'
@@ -697,6 +756,16 @@ function resetNetworkRecovery(): void {
 }
 
 function updatePlaybackState(state: PlaybackState, message: string): void {
+  const powered = state !== 'idle'
+  elements.app.dataset.power = powered ? 'on' : 'off'
+  elements.stop.setAttribute('aria-pressed', String(powered))
+  elements.stop.setAttribute('aria-label', powered ? '关闭电视' : '打开电视')
+  elements.stop.title = powered ? '关闭电视' : '打开电视'
+  const labels: Record<PlaybackState, string> = {
+    idle: '待机', loading: '连接中', playing: '播放中', paused: '已暂停',
+    'waiting-network': '等待网络', error: '信号中断'
+  }
+  elements.powerLabel.textContent = labels[state]
   elements.togglePlay.classList.toggle('is-playing', state === 'playing')
   elements.togglePlay.setAttribute('aria-label', state === 'playing' ? '暂停' : '播放')
   elements.playerStatus.classList.toggle('error', state === 'error')
@@ -728,6 +797,7 @@ async function togglePlayback(): Promise<void> {
   const channel = getChannel(selectedChannelId) ?? channelList.channels[0]
   if (!channel) {
     showToast('当前筛选条件下没有可播放频道')
+    openSidebar()
     return
   }
   if (channel.id !== selectedChannelId) selectChannel(channel.id, false, false)
@@ -804,7 +874,7 @@ async function toggleFullscreen(): Promise<void> {
   fullscreenTransitionInProgress = true
   elements.fullscreen.disabled = true
   try {
-    if (requested) elements.app.classList.remove('sidebar-open')
+    if (requested) { closeSidebar(); closeSources() }
     const fullscreen = await window.tvFeed.setPlayerFullscreen(requested)
     syncFullscreenControl(fullscreen)
     if (fullscreen !== requested) showToast(requested ? '系统未能进入全屏' : '系统未能退出全屏')
@@ -824,36 +894,74 @@ function syncFullscreenControl(fullscreen: boolean): void {
 }
 
 function openSidebar(): void {
-  if (compactSidebarQuery.matches) elements.app.classList.add('sidebar-open')
-  else elements.app.classList.remove('sidebar-collapsed')
+  closeSources()
+  elements.app.classList.add('sidebar-open')
   syncSidebarState()
-  requestAnimationFrame(() => elements.search.focus())
+  renderVirtualRows()
+  // Transfer focus once the screen menu has finished entering, including when
+  // reduced motion cancels or shortens its transition.
+  void Promise.allSettled(elements.channelPane.getAnimations().map((animation) => animation.finished)).then(() => {
+    if (elements.infoDialog.open || !elements.app.classList.contains('sidebar-open')) return
+    const target = elements.search.disabled ? elements.retryCatalog : elements.search
+    target.focus({ preventScroll: true })
+  })
 }
 
 function closeSidebar(): void {
-  if (compactSidebarQuery.matches) elements.app.classList.remove('sidebar-open')
-  else elements.app.classList.add('sidebar-collapsed')
+  const returnFocus = elements.channelPane.contains(document.activeElement)
+  elements.app.classList.remove('sidebar-open')
   syncSidebarState()
-  if (elements.channelPane.contains(document.activeElement)) requestAnimationFrame(() => elements.sidebarToggle.focus())
-}
-
-function resetSidebarForViewport(): void {
-  elements.app.classList.remove('sidebar-open', 'sidebar-collapsed')
-  syncSidebarState()
-  renderVirtualRows()
+  if (returnFocus) elements.sidebarToggle.focus({ preventScroll: true })
 }
 
 function syncSidebarState(): void {
-  const compact = compactSidebarQuery.matches
-  const visible = compact
-    ? elements.app.classList.contains('sidebar-open')
-    : !elements.app.classList.contains('sidebar-collapsed')
+  const visible = elements.app.classList.contains('sidebar-open')
   elements.sidebarToggle.setAttribute('aria-expanded', String(visible))
-  elements.sidebarToggle.setAttribute('aria-label', compact ? '打开频道目录' : '显示频道目录')
-  elements.sidebarToggle.title = compact ? '打开频道目录' : '显示频道目录'
-  elements.sidebarClose.setAttribute('aria-label', compact ? '关闭频道目录' : '隐藏频道目录')
-  elements.sidebarClose.title = compact ? '关闭频道目录' : '隐藏频道目录'
+  elements.sidebarToggle.setAttribute('aria-label', visible ? '关闭频道目录' : '打开频道目录')
+  elements.sidebarToggle.title = visible ? '关闭频道目录' : '打开频道目录（/）'
   elements.channelPane.inert = !visible
+}
+
+function syncChannelDial(): void {
+  const index = channelList.channels.findIndex((channel) => channel.id === selectedChannelId)
+  channelDial.sync(Math.max(1, index + 1), channelList.channels.length)
+  if (index < 0) elements.channelNumber.value = '—'
+}
+
+function syncSettingsBounds(): void {
+  const screen = elements.playerStage.getBoundingClientRect()
+  for (const [name, value] of Object.entries({
+    left: screen.left + 12, top: screen.top + 12,
+    width: Math.max(0, screen.width - 24), height: Math.max(0, screen.height - 24)
+  })) elements.infoDialog.style.setProperty(`--dialog-${name}`, `${value}px`)
+}
+
+function syncVolumeControl(): void {
+  const { percent, muted } = player.volumeState
+  volumeDial.sync(percent)
+  elements.mute.setAttribute('aria-pressed', String(muted))
+  elements.mute.setAttribute('aria-label', muted ? '取消静音' : '静音')
+  elements.mute.title = muted ? '取消静音（M）' : '静音（M）'
+  const icon = elements.mute.querySelector('i')
+  if (icon) icon.className = muted ? 'ph ph-speaker-slash' : 'ph ph-speaker-high'
+}
+
+function toggleSources(): void {
+  if (closeSources()) return
+  closeSidebar()
+  elements.sourcePanel.hidden = false
+  elements.sourceToggle.setAttribute('aria-expanded', 'true')
+  const target = elements.sourceList.querySelector<HTMLButtonElement>('[aria-pressed="true"]') ?? elements.sourceClose
+  target.focus({ preventScroll: true })
+}
+
+function closeSources(): boolean {
+  if (elements.sourcePanel.hidden) return false
+  const returnFocus = elements.sourcePanel.contains(document.activeElement)
+  elements.sourcePanel.hidden = true
+  elements.sourceToggle.setAttribute('aria-expanded', 'false')
+  if (returnFocus) elements.sourceToggle.focus({ preventScroll: true })
+  return true
 }
 
 function showCatalogFailure(failure: CatalogLoadFailure): void {
@@ -863,8 +971,10 @@ function showCatalogFailure(failure: CatalogLoadFailure): void {
   delete elements.app.dataset.catalogSource
   delete elements.app.dataset.catalogCount
   channelList.clear()
+  syncChannelDial()
   player.stop()
   catalogStatus.showFailure(failure)
+  openSidebar()
   showToast(`${failure.title}，可以重新尝试或主动打开离线演示`, 7000)
 }
 

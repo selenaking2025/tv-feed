@@ -15,6 +15,7 @@
   "scripts": {
     "postinstall": "node scripts/ensure-electron-runtime.mjs",
     "dev": "node scripts/ensure-electron-runtime.mjs && electron-vite dev",
+    "desktop:dev": "npm run dev",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
     "verify:repository": "node scripts/verify-repository-boundaries.mjs",

@@ -189,6 +189,13 @@ export class StreamPlayer {
     return this.volumeState
   }
 
+  setVolume(percent: number): VolumeState {
+    if (!Number.isFinite(percent)) return this.volumeState
+    this.video.volume = Math.max(0, Math.min(100, Math.round(percent))) / 100
+    if (this.video.volume > 0) this.video.muted = false
+    return this.volumeState
+  }
+
   async togglePictureInPicture(): Promise<void> {
     if (!this.currentSource) throw new Error('请先播放一个频道')
     if (!document.pictureInPictureEnabled || typeof this.video.requestPictureInPicture !== 'function') {

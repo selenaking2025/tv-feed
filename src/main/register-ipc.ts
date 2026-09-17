@@ -109,6 +109,14 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
     trust(event.senderFrame?.url ?? '')
     return options.appVersion
   })
+  ipcMain.handle(IPC_CHANNELS.appWindowAction, (event, action: unknown) => {
+    trust(event.senderFrame?.url ?? '')
+    if (action !== 'minimize' && action !== 'close') throw new Error('窗口操作无效')
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window || window.isDestroyed()) return
+    if (action === 'minimize') window.minimize()
+    else window.close()
+  })
   ipcMain.handle(IPC_CHANNELS.playerSetFullscreen, (event, fullscreen: unknown) => {
     trust(event.senderFrame?.url ?? '')
     if (typeof fullscreen !== 'boolean') throw new Error('全屏状态必须是布尔值')

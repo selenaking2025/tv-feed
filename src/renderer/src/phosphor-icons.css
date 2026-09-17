@@ -37,6 +37,13 @@
 .ph.ph-corners-in::before { content: "\e1ce"; }
 .ph.ph-corners-out::before { content: "\e1d0"; }
 .ph.ph-magnifying-glass::before { content: "\e30c"; }
+.ph.ph-minus::before { content: "\e32a"; }
+.ph.ph-list::before { content: "\e2f0"; }
+.ph.ph-plugs-connected::before { content: "\eb5a"; }
+.ph.ph-power::before { content: "\e3da"; }
+.ph.ph-sliders-horizontal::before { content: "\e434"; }
+.ph.ph-speaker-high::before { content: "\e44a"; }
+.ph.ph-speaker-slash::before { content: "\e45a"; }
 .ph.ph-picture-in-picture::before { content: "\e64c"; }
 .ph.ph-shield-check::before { content: "\e40c"; }
 .ph.ph-sidebar-simple::before { content: "\ec24"; }

@@ -158,16 +158,8 @@ if (checks.rows < 8 || checks.visibleChannelNames < 8 || checks.sourceButtons < 
 if (!checks.favoriteToggleWorks || !checks.searchFilterWorks) {
   throw new Error(`核心交互未通过：${JSON.stringify(checks)}`)
 }
-if (!checks.controlsBelowPlayer || !checks.sidebarCollapseWorks || !checks.sidebarRestoreWorks ||
-  (checks.sidebarMode === 'drawer' && !checks.drawerDismissWorks)) {
-  throw new Error(`播放器布局或侧栏折叠未通过：${JSON.stringify({
-    controlsBelowPlayer: checks.controlsBelowPlayer,
-    sidebarCollapseWorks: checks.sidebarCollapseWorks,
-    sidebarRestoreWorks: checks.sidebarRestoreWorks,
-    playerExpansion: checks.playerExpansion,
-    sidebarMode: checks.sidebarMode,
-    drawerDismissWorks: checks.drawerDismissWorks
-  })}`)
+if (!checks.deviceCheck?.passed) {
+  throw new Error(`电视机布局、菜单或旋钮验收未通过：${JSON.stringify(checks.deviceCheck)}`)
 }
 if (!checks.fullscreenCheck?.passed) {
   throw new Error(`播放器全屏未通过：${JSON.stringify(checks.fullscreenCheck)}`)
@@ -239,7 +231,7 @@ if (checks.catalogSource === 'offline-sample' && checks.sourceHealthSummary?.pre
 if (liveCatalog && !checks.officialSourceMarkingCheck?.passed) {
   throw new Error(`官方源标记验收失败：${JSON.stringify(checks.officialSourceMarkingCheck)}`)
 }
-if (!checks.gridColumns || checks.gridColumns === 'none') throw new Error(`双栏布局未生效：${checks.gridColumns}`)
+if (!checks.gridColumns || checks.gridColumns === 'none') throw new Error(`电视机控制面板布局未生效：${checks.gridColumns}`)
 
 const screenshot = await stat(screenshotPath)
 if (screenshot.size < 50_000) throw new Error(`验收截图异常小：${screenshot.size} bytes`)

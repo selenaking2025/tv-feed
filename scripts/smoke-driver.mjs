@@ -1,11 +1,13 @@
 import { app, BrowserWindow } from 'electron'
 import { writeFile } from 'node:fs/promises'
+import { runDeviceInspection } from './device-smoke.mjs'
 
 export async function runSmokeInspection(webContents                      , runtime               )                {
   const outputPath = runtime.smoke.outputPath
   if (!outputPath) return
 
   try {
+    webContents.setBackgroundThrottling(false)
     const playbackCheck = await runPlaybackCheck(webContents, runtime)
     const familySafetyCheck = await runFamilySafetyCheck(webContents, runtime)
     const playbackDiagnosticCheck = await runPlaybackDiagnosticCheck(webContents, runtime)
@@ -20,7 +22,7 @@ export async function runSmokeInspection(webContents                      , runt
         .filter((element) => element.getBoundingClientRect().width > 30 && element.textContent?.trim()).length
       const video = document.querySelector('video')
       const selected = document.querySelector('[data-channel-selected="true"]')
-      const layout = document.querySelector('.workspace')
+      const layout = document.querySelector('.player-surface')
       const search = document.querySelector('#channel-search')
       const countrySelect = document.querySelector('#country-filter')
       const countryOptions = countrySelect instanceof HTMLSelectElement
@@ -64,92 +66,11 @@ export async function runSmokeInspection(webContents                      , runt
       const catalogFailureVisible = catalogFailure instanceof HTMLElement && !catalogFailure.hidden
       if (catalogFailureVisible && diagnosticsToggle instanceof HTMLButtonElement) diagnosticsToggle.click()
       const diagnosticsVisible = diagnostics instanceof HTMLElement && !diagnostics.hidden && Boolean(diagnostics.textContent?.trim())
-      const playerStage = document.querySelector('#player-stage')
-      const playerSurface = document.querySelector('#player-surface')
-      const playerControls = document.querySelector('.player-controls')
-      const sidebarClose = document.querySelector('#sidebar-close')
-      const sidebarToggle = document.querySelector('#sidebar-toggle')
-      const channelPane = document.querySelector('#channel-pane')
-      const stageRect = playerStage?.getBoundingClientRect()
-      const controlsRect = playerControls?.getBoundingClientRect()
-      const controlsBelowPlayer = Boolean(
-        playerSurface &&
-        playerControls?.parentElement === playerSurface &&
-        stageRect &&
-        controlsRect &&
-        controlsRect.top >= stageRect.bottom &&
-        getComputedStyle(playerControls).position !== 'absolute'
-      )
-      let sidebarCollapseWorks = false
-      let sidebarRestoreWorks = false
-      let playerExpansion = 0
-      const sidebarMode = matchMedia('(max-width: 1040px)').matches ? 'drawer' : 'dock'
-      let drawerDismissWorks = false
-      if (
-        app instanceof HTMLElement &&
-        playerStage instanceof HTMLElement &&
-        sidebarClose instanceof HTMLButtonElement &&
-        sidebarToggle instanceof HTMLButtonElement &&
-        channelPane instanceof HTMLElement &&
-        matchMedia('(min-width: 1041px)').matches
-      ) {
-        const initialPlayerWidth = playerStage.getBoundingClientRect().width
-        sidebarClose.click()
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-        const collapsedPlayerWidth = playerStage.getBoundingClientRect().width
-        playerExpansion = Math.round(collapsedPlayerWidth - initialPlayerWidth)
-        sidebarCollapseWorks =
-          app.classList.contains('sidebar-collapsed') &&
-          getComputedStyle(channelPane).display === 'none' &&
-          getComputedStyle(sidebarToggle).display !== 'none' &&
-          sidebarToggle.getAttribute('aria-expanded') === 'false' &&
-          channelPane.inert &&
-          playerExpansion > 100
-        sidebarToggle.click()
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-        sidebarRestoreWorks =
-          !app.classList.contains('sidebar-collapsed') &&
-          getComputedStyle(channelPane).display !== 'none' &&
-          sidebarToggle.getAttribute('aria-expanded') === 'true' &&
-          !channelPane.inert
-      } else if (
-        app instanceof HTMLElement &&
-        sidebarClose instanceof HTMLButtonElement &&
-        sidebarToggle instanceof HTMLButtonElement &&
-        channelPane instanceof HTMLElement &&
-        sidebarMode === 'drawer'
-      ) {
-        const settleDrawer = () => new Promise(resolve => setTimeout(resolve, 300))
-        sidebarToggle.click()
-        await settleDrawer()
-        const openRect = channelPane.getBoundingClientRect()
-        sidebarRestoreWorks =
-          app.classList.contains('sidebar-open') &&
-          sidebarToggle.getAttribute('aria-expanded') === 'true' &&
-          !channelPane.inert &&
-          openRect.left >= 0 && openRect.right <= innerWidth &&
-          openRect.width > 200 && document.activeElement === search
-        sidebarClose.click()
-        await settleDrawer()
-        sidebarCollapseWorks =
-          !app.classList.contains('sidebar-open') &&
-          sidebarToggle.getAttribute('aria-expanded') === 'false' &&
-          channelPane.inert && channelPane.getBoundingClientRect().right <= 0
-        sidebarToggle.click()
-        await settleDrawer()
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-        const escapeClosed = !app.classList.contains('sidebar-open') && channelPane.inert
-        sidebarToggle.click()
-        await settleDrawer()
-        document.querySelector('#drawer-scrim')?.click()
-        drawerDismissWorks = escapeClosed && !app.classList.contains('sidebar-open') && channelPane.inert
-        await settleDrawer()
-      }
       const focusOutlineVisible = [...document.styleSheets].some((sheet) =>
         [...sheet.cssRules].some((rule) => rule instanceof CSSStyleRule &&
           rule.selectorText.includes(':focus-visible') &&
-          rule.style.outlineStyle !== 'none' &&
-          parseFloat(rule.style.outlineWidth) >= 2)
+          rule.style.outline !== 'none' &&
+          (parseFloat(rule.style.outlineWidth) >= 2 || /^2px solid/.test(rule.style.outline)))
       )
       const mutedBefore = video instanceof HTMLVideoElement ? video.muted : null
       const volumeBefore = video instanceof HTMLVideoElement ? video.volume : null
@@ -231,12 +152,6 @@ export async function runSmokeInspection(webContents                      , runt
         searchFilterWorks,
         officialSourceMarkingCheck,
         gridColumns: layout ? getComputedStyle(layout).gridTemplateColumns : '',
-        controlsBelowPlayer,
-        sidebarCollapseWorks,
-        sidebarRestoreWorks,
-        playerExpansion,
-        sidebarMode,
-        drawerDismissWorks,
         searchLabel: search?.getAttribute('aria-label') ?? '',
         resultCountAnnounced: resultCount?.getAttribute('role') === 'status' && resultCount?.getAttribute('aria-live') === 'polite',
         channelHealthAnnounced: channelHealth?.getAttribute('role') === 'status' && channelHealth?.getAttribute('aria-live') === 'polite',
@@ -253,6 +168,7 @@ export async function runSmokeInspection(webContents                      , runt
       }
     })()`)
     const offlineDemoTransitionCheck = await runOfflineDemoTransitionCheck(webContents, runtime)
+    const deviceCheck = await runDeviceInspection(webContents, runtime)
     const fullscreenCheck = await runFullscreenCheck(webContents)
     await webContents.executeJavaScript(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
     const image = await webContents.capturePage()
@@ -263,6 +179,7 @@ export async function runSmokeInspection(webContents                      , runt
       playbackDiagnosticCheck,
       offlineDemoTransitionCheck,
       fullscreenCheck,
+      deviceCheck,
       directExternalFetchBlocked: directExternalFetchBlocked === true,
       packaged: app.isPackaged,
       appName: app.getName(),
@@ -352,7 +269,7 @@ async function runFullscreenCheck(webContents                      )            
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
   const enteredSnapshot          = await webContents.executeJavaScript(`(() => {
     const app = document.querySelector('#app-shell')
-    const controls = document.querySelector('.player-controls')
+    const controls = document.querySelector('.device-footer')
     const button = document.querySelector('#fullscreen-player')
     const surface = document.querySelector('#player-surface')
     const channelPane = document.querySelector('#channel-pane')
@@ -362,7 +279,7 @@ async function runFullscreenCheck(webContents                      )            
       controlsVisible: controls instanceof HTMLElement && controls.getBoundingClientRect().height >= 40 && getComputedStyle(controls).display !== 'none',
       exitLabelVisible: button?.getAttribute('aria-label') === '退出全屏' && button?.classList.contains('is-fullscreen'),
       playerFillsViewport: surface instanceof HTMLElement && surface.getBoundingClientRect().width >= innerWidth - 2 && surface.getBoundingClientRect().height >= innerHeight - 2,
-      surroundingChromeHidden: channelPane instanceof HTMLElement && titlebar instanceof HTMLElement && getComputedStyle(channelPane).display === 'none' && getComputedStyle(titlebar).display === 'none'
+      surroundingChromeHidden: channelPane instanceof HTMLElement && titlebar instanceof HTMLElement && channelPane.inert && getComputedStyle(channelPane).visibility === 'hidden' && getComputedStyle(titlebar).display === 'none'
     }
   })()`)
   const entered = enteredSnapshot && typeof enteredSnapshot === 'object'

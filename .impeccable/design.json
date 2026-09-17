@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-17T03:55:18.400591+00:00",
+  "title": "Design System: TV Feed",
+  "extensions": {
+    "shadows": [
+      {
+        "name": "cabinet",
+        "value": "inset 0 2px 1px #d5715d, inset 0 -5px 2px #421b18, 0 8px 13px rgba(0,0,0,0.3)",
+        "purpose": "外壳上沿高光与下沿暗边"
+      },
+      {
+        "name": "front",
+        "value": "inset 0 2px 2px rgba(255,198,147,0.35), inset -4px 0 9px rgba(96,19,15,0.15)",
+        "purpose": "红色塑料面盖"
+      },
+      {
+        "name": "face",
+        "value": "0 2px 1px #d16850, inset 0 2px 3px #515249, 0 5px 9px rgba(74,17,13,0.35)",
+        "purpose": "黑色前面板内陷"
+      },
+      {
+        "name": "screen",
+        "value": "inset 0 4px 6px #080a07, 0 1px 1px #606255",
+        "purpose": "显像管深边框"
+      },
+      {
+        "name": "dial",
+        "value": "0 4px 3px #11130f, 0 8px 12px rgba(0,0,0,0.35), inset 0 1px 1px #9c9c88",
+        "purpose": "凸起旋钮"
+      },
+      {
+        "name": "key",
+        "value": "inset 0 1px 1px #67685a, 0 2px 3px #13160e",
+        "purpose": "实体按键"
+      }
+    ],
+    "motion": [
+      {
+        "name": "menu-enter",
+        "value": "150ms opacity, 180ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "菜单进入完成后转移键盘焦点"
+      },
+      {
+        "name": "button-press",
+        "value": "90ms transform, translateY(2px)",
+        "purpose": "按键按下反馈"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact-width",
+        "value": "840px"
+      },
+      {
+        "name": "compact-height",
+        "value": "680px"
+      },
+      {
+        "name": "defensive-width",
+        "value": "620px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "实体按键",
+      "kind": "button",
+      "refersTo": "device-key",
+      "description": "沿用实际界面的控件形态；运行行为以源码为准。",
+      "html": "<button class=\"device-key\" aria-label=\"下一个频道\">▷</button>",
+      "css": ":host {\n  color-scheme: dark;\n  font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  font-synthesis: none;\n  --bg: #191a18;\n  --panel: #20211e;\n  --panel-raised: #2b2c28;\n  --panel-soft: #34352f;\n  --text: #f2ecde;\n  --text-muted: #c3bdb0;\n  --text-soft: #aaa497;\n  --accent: #efd9b0;\n  --accent-soft: rgba(239, 217, 176, 0.12);\n  --accent-text: #38271e;\n  --danger: #ffae9f;\n  --warning: #efbf79;\n  --line: rgba(244, 224, 190, 0.13);\n  --line-strong: rgba(244, 224, 190, 0.28);\n  --radius-lg: 20px;\n  --radius-md: 10px;\n  --radius-sm: 6px;\n  --row-height: 64px;\n  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);\n}\nbutton,input{font:inherit;box-sizing:border-box;}\n.device-key { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 38px; height: 34px; padding: 0; border: 1px solid #59594b; border-radius: 5px; background: linear-gradient(#47493e, #303328); box-shadow: inset 0 1px 1px #67685a, 0 2px 3px #13160e; color: #e9dec6; }\n.device-key:hover { background: #535547; }"
+    },
+    {
+      "name": "播放键",
+      "kind": "button",
+      "refersTo": "play-key",
+      "description": "沿用实际界面的控件形态；运行行为以源码为准。",
+      "html": "<button class=\"device-key play-key\" aria-label=\"播放\">▶</button>",
+      "css": ":host {\n  color-scheme: dark;\n  font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  font-synthesis: none;\n  --bg: #191a18;\n  --panel: #20211e;\n  --panel-raised: #2b2c28;\n  --panel-soft: #34352f;\n  --text: #f2ecde;\n  --text-muted: #c3bdb0;\n  --text-soft: #aaa497;\n  --accent: #efd9b0;\n  --accent-soft: rgba(239, 217, 176, 0.12);\n  --accent-text: #38271e;\n  --danger: #ffae9f;\n  --warning: #efbf79;\n  --line: rgba(244, 224, 190, 0.13);\n  --line-strong: rgba(244, 224, 190, 0.28);\n  --radius-lg: 20px;\n  --radius-md: 10px;\n  --radius-sm: 6px;\n  --row-height: 64px;\n  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);\n}\nbutton,input{font:inherit;box-sizing:border-box;}\n.device-key { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 38px; height: 34px; padding: 0; border: 1px solid #59594b; border-radius: 5px; background: linear-gradient(#47493e, #303328); box-shadow: inset 0 1px 1px #67685a, 0 2px 3px #13160e; color: #e9dec6; }\n.play-key { width: 42px; border-color: #e6ce9f; background: linear-gradient(#ead8b3, #bba479); color: #583327; box-shadow: inset 0 1px 1px #fff1ce, 0 2px 4px #13160e; }\n.play-key:hover { background: #f0dfba; }"
+    },
+    {
+      "name": "电源键",
+      "kind": "button",
+      "refersTo": "power-key",
+      "description": "沿用实际界面的控件形态；运行行为以源码为准。",
+      "html": "<button class=\"power-button\">电源</button>",
+      "css": ":host {\n  color-scheme: dark;\n  font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  font-synthesis: none;\n  --bg: #191a18;\n  --panel: #20211e;\n  --panel-raised: #2b2c28;\n  --panel-soft: #34352f;\n  --text: #f2ecde;\n  --text-muted: #c3bdb0;\n  --text-soft: #aaa497;\n  --accent: #efd9b0;\n  --accent-soft: rgba(239, 217, 176, 0.12);\n  --accent-text: #38271e;\n  --danger: #ffae9f;\n  --warning: #efbf79;\n  --line: rgba(244, 224, 190, 0.13);\n  --line-strong: rgba(244, 224, 190, 0.28);\n  --radius-lg: 20px;\n  --radius-md: 10px;\n  --radius-sm: 6px;\n  --row-height: 64px;\n  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);\n}\nbutton,input{font:inherit;box-sizing:border-box;}\n.power-button { display: flex; align-items: center; justify-content: center; gap: 8px; width: 90px; height: 36px; padding: 0; border: 1px solid #d6674e; border-radius: 5px; background: linear-gradient(#b34534, #8c2f25); box-shadow: inset 0 1px 1px #ed8c67, 0 3px 4px #11140d; color: #f8e0c1; font-size: 11px; }"
+    },
+    {
+      "name": "搜索",
+      "kind": "input",
+      "refersTo": "search-field",
+      "description": "沿用实际界面的控件形态；运行行为以源码为准。",
+      "html": "<div class=\"channel-pane-preview\"><div class=\"search-box\"><input aria-label=\"搜索频道\" placeholder=\"频道、国家或分类…\" /></div></div>",
+      "css": ":host {\n  color-scheme: dark;\n  font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  font-synthesis: none;\n  --bg: #191a18;\n  --panel: #20211e;\n  --panel-raised: #2b2c28;\n  --panel-soft: #34352f;\n  --text: #f2ecde;\n  --text-muted: #c3bdb0;\n  --text-soft: #aaa497;\n  --accent: #efd9b0;\n  --accent-soft: rgba(239, 217, 176, 0.12);\n  --accent-text: #38271e;\n  --danger: #ffae9f;\n  --warning: #efbf79;\n  --line: rgba(244, 224, 190, 0.13);\n  --line-strong: rgba(244, 224, 190, 0.28);\n  --radius-lg: 20px;\n  --radius-md: 10px;\n  --radius-sm: 6px;\n  --row-height: 64px;\n  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);\n}\nbutton,input{font:inherit;box-sizing:border-box;}\n.search-box {\n  position: relative;\n  display: flex;\n  align-items: center;\n  height: 46px;\n  margin-top: 16px;\n  border: 1px solid var(--line);\n  border-radius: 12px;\n  background: rgba(255, 255, 255, 0.04);\n  transition: border-color 150ms ease, background 150ms ease;\n}\n.search-box input {\n  min-width: 0;\n  flex: 1;\n  height: 100%;\n  padding: 0 9px;\n  border: 0;\n  outline: 0;\n  background: transparent;\n  color: var(--text);\n  font-size: 13.5px;\n}\n.search-box:focus-within {\n  border-color: rgba(239, 217, 176, 0.56);\n  background: rgba(239, 217, 176, 0.05);\n}"
+    },
+    {
+      "name": "范围选项",
+      "kind": "nav",
+      "refersTo": "view-tabs",
+      "description": "沿用实际界面的控件形态；运行行为以源码为准。",
+      "html": "<nav class=\"view-tabs\" aria-label=\"频道范围\"><button aria-pressed=\"true\">全部</button><button>中文</button><button>收藏</button><button>最近</button></nav>",
+      "css": ":host {\n  color-scheme: dark;\n  font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  font-synthesis: none;\n  --bg: #191a18;\n  --panel: #20211e;\n  --panel-raised: #2b2c28;\n  --panel-soft: #34352f;\n  --text: #f2ecde;\n  --text-muted: #c3bdb0;\n  --text-soft: #aaa497;\n  --accent: #efd9b0;\n  --accent-soft: rgba(239, 217, 176, 0.12);\n  --accent-text: #38271e;\n  --danger: #ffae9f;\n  --warning: #efbf79;\n  --line: rgba(244, 224, 190, 0.13);\n  --line-strong: rgba(244, 224, 190, 0.28);\n  --radius-lg: 20px;\n  --radius-md: 10px;\n  --radius-sm: 6px;\n  --row-height: 64px;\n  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);\n}\nbutton,input{font:inherit;box-sizing:border-box;}\n.view-tabs {\n  display: grid;\n  grid-template-columns: repeat(4, minmax(0, 1fr));\n  gap: 4px;\n  margin-top: 12px;\n  padding: 4px;\n  border: 1px solid rgba(232, 236, 242, 0.06);\n  border-radius: 12px;\n  background: rgba(255, 255, 255, 0.028);\n}\n.view-tabs button {\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  gap: 5px;\n  min-height: 36px;\n  padding: 0 7px;\n  border: 0;\n  border-radius: 9px;\n  background: transparent;\n  color: var(--text-muted);\n  font-size: 12.5px;\n  font-weight: 650;\n}\n.view-tabs button[aria-pressed=\"true\"] {\n  background: #60312c;\n  color: var(--text);\n  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045), 0 4px 14px rgba(0, 0, 0, 0.18);\n}"
+    },
+    {
+      "name": "换台旋钮",
+      "kind": "custom",
+      "refersTo": "rotary-dial",
+      "description": "沿用实际界面的控件形态；运行行为以源码为准。",
+      "html": "<div class=\"rotary-dial\" role=\"slider\" tabindex=\"0\" aria-label=\"换台\" aria-valuemin=\"1\" aria-valuemax=\"8\" aria-valuenow=\"1\"><div class=\"dial-face\"><span class=\"dial-pointer\"></span><span class=\"tuner-grip\"></span></div></div>",
+      "css": ":host {\n  color-scheme: dark;\n  font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  font-synthesis: none;\n  --bg: #191a18;\n  --panel: #20211e;\n  --panel-raised: #2b2c28;\n  --panel-soft: #34352f;\n  --text: #f2ecde;\n  --text-muted: #c3bdb0;\n  --text-soft: #aaa497;\n  --accent: #efd9b0;\n  --accent-soft: rgba(239, 217, 176, 0.12);\n  --accent-text: #38271e;\n  --danger: #ffae9f;\n  --warning: #efbf79;\n  --line: rgba(244, 224, 190, 0.13);\n  --line-strong: rgba(244, 224, 190, 0.28);\n  --radius-lg: 20px;\n  --radius-md: 10px;\n  --radius-sm: 6px;\n  --row-height: 64px;\n  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);\n}\nbutton,input{font:inherit;box-sizing:border-box;}\n.rotary-dial { position: relative; width: 88px; height: 88px; border: 1px solid #10120f; border-radius: 50%; background: repeating-conic-gradient(#66675c 0deg 3deg, #30322b 3deg 8deg); box-shadow: 0 4px 3px #11130f, 0 8px 12px rgba(0,0,0,0.35), inset 0 1px 1px #9c9c88; cursor: ns-resize; touch-action: none; user-select: none; }\n.dial-face { position: absolute; inset: 5px; border-radius: 50%; background: linear-gradient(135deg, #57594e, #30322b 65%); box-shadow: inset 0 2px 1px #7d7e6f, inset 0 -2px 3px #1a1c17; transform: rotate(var(--dial-angle, -135deg)); pointer-events: none; }\n.dial-pointer { position: absolute; top: 6px; left: calc(50% - 2px); width: 4px; height: 13px; border-radius: 2px; background: #ead9b6; }\n.tuner-grip { position: absolute; top: 28px; left: 7px; right: 7px; height: 23px; border: 1px solid #24271f; border-radius: 5px; background: linear-gradient(#9b9c88, #535649 45%, #373a30); box-shadow: inset 0 1px 1px #b8b7a1, 0 4px 5px #171a13; }"
+    },
+    {
+      "name": "设置确认",
+      "kind": "button",
+      "refersTo": "dialog-primary",
+      "description": "沿用实际界面的控件形态；运行行为以源码为准。",
+      "html": "<button class=\"dialog-primary\">知道了</button>",
+      "css": ":host {\n  color-scheme: dark;\n  font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  font-synthesis: none;\n  --bg: #191a18;\n  --panel: #20211e;\n  --panel-raised: #2b2c28;\n  --panel-soft: #34352f;\n  --text: #f2ecde;\n  --text-muted: #c3bdb0;\n  --text-soft: #aaa497;\n  --accent: #efd9b0;\n  --accent-soft: rgba(239, 217, 176, 0.12);\n  --accent-text: #38271e;\n  --danger: #ffae9f;\n  --warning: #efbf79;\n  --line: rgba(244, 224, 190, 0.13);\n  --line-strong: rgba(244, 224, 190, 0.28);\n  --radius-lg: 20px;\n  --radius-md: 10px;\n  --radius-sm: 6px;\n  --row-height: 64px;\n  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);\n}\nbutton,input{font:inherit;box-sizing:border-box;}\n.dialog-primary {\n  min-width: 96px;\n  min-height: 42px;\n  border: 0;\n  border-radius: var(--radius-sm);\n  background: var(--accent);\n  color: var(--accent-text);\n  font-weight: 800;\n}"
+    }
+  ],
+  "narrative": {
+    "northStar": "窗口本身就是一整台黑红复古电视机",
+    "overview": "红壳、黑色前面板、左侧显像管形状的屏幕与右侧实体旋钮共同构成设备；辅助功能在屏幕内按需展开。",
+    "keyCharacteristics": [
+      "左屏右控制区",
+      "红色塑料壳、提手与脚垫",
+      "真实可操作的旋钮和电源",
+      "原比例、无滤镜的视频"
+    ],
+    "rules": [
+      {
+        "name": "原始节目画面",
+        "body": "纹理仅用于外壳与待机层，节目保持原比例，不叠加复古滤镜。",
+        "section": "elevation"
+      },
+      {
+        "name": "屏内菜单",
+        "body": "目录、线路与设置保留在电视屏幕内；设置可滚动，关闭后焦点返回设置键。",
+        "section": "layout"
+      }
+    ],
+    "dos": [
+      "在980×780与720×580窗口验证完整整机与菜单",
+      "保持键盘与鼠标均可操作"
+    ],
+    "donts": [
+      "不要恢复屏幕外常驻侧栏",
+      "不要把小于最小窗口的防御规则宣称为移动端支持"
+    ]
+  }
+}

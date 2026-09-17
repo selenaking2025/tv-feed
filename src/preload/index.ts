@@ -28,6 +28,7 @@ const bridge: TvFeedBridge = Object.freeze({
   endPlayback: (sessionId: string) => ipcRenderer.send(IPC_CHANNELS.playbackEnd, sessionId),
   isNetworkOnline: () => ipcRenderer.invoke(IPC_CHANNELS.networkStatus),
   getAppVersion: () => ipcRenderer.invoke(IPC_CHANNELS.appVersion),
+  windowAction: (action: 'minimize' | 'close') => ipcRenderer.invoke(IPC_CHANNELS.appWindowAction, action),
   setPlayerFullscreen: (fullscreen: boolean) => ipcRenderer.invoke(IPC_CHANNELS.playerSetFullscreen, fullscreen),
   onPlayerFullscreenChange: (callback: (fullscreen: boolean) => void) => {
     const listener = (_event: IpcRendererEvent, fullscreen: unknown): void => {

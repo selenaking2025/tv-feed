@@ -91,14 +91,14 @@ function createMainWindow(resources: RemoteResourceBroker): void {
   mainWindow = new BrowserWindow({
     width: runtime.smoke.windowWidth,
     height: runtime.smoke.windowHeight,
-    minWidth: 820,
-    minHeight: 620,
+    minWidth: 720,
+    minHeight: 580,
     show: false,
-    backgroundColor: '#090b10',
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    backgroundColor: '#00000000',
     title: 'TV Feed',
-    ...(process.platform === 'darwin'
-      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 18, y: 18 } }
-      : {}),
     webPreferences: {
       preload: preloadPath,
       nodeIntegration: false,

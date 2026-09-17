@@ -5,9 +5,10 @@ import type { CatalogChannel } from '../../shared/catalog-contracts.ts'
 
 interface KeyboardOptions {
   elements: { app: HTMLElement; search: HTMLInputElement; infoDialog: HTMLDialogElement }
-  compactSidebarQuery: MediaQueryList
+  openSidebar: () => void
   channels: () => readonly CatalogChannel[]
   closeSidebar: () => void
+  closeSources: () => boolean
   toggleFullscreen: () => Promise<void>
   togglePictureInPicture: () => Promise<void>
   togglePlayback: () => Promise<void>
@@ -21,32 +22,34 @@ interface KeyboardOptions {
 }
 
 export function createKeyboardControls(options: KeyboardOptions) {
-  const { elements, compactSidebarQuery, closeSidebar, toggleFullscreen, togglePictureInPicture,
+  const { elements, openSidebar, closeSidebar, toggleFullscreen, togglePictureInPicture,
     togglePlayback, moveChannel, selectChannel, ensureChannelVisible, announce, showToast } = options
   let channelNumberBuffer = ''
   let channelNumberTimer: number | undefined
   return { handleKeydown: handleGlobalKeydown, resetNumber: resetChannelNumberBuffer }
 
   function handleGlobalKeydown(event: KeyboardEvent): void {
-    const target = event.target as HTMLElement | null
+    if (event.defaultPrevented || elements.infoDialog.open) return
+    const target = event.target instanceof HTMLElement ? event.target : null
     const isEditing = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement || target?.isContentEditable
 
     if (event.key === 'Escape') {
-      if (elements.app.classList.contains('player-fullscreen')) {
+      if (elements.app.classList.contains('sidebar-open')) closeSidebar()
+      else if (options.closeSources()) return
+      else if (elements.app.classList.contains('player-fullscreen')) {
         event.preventDefault()
         void toggleFullscreen()
-      } else if (compactSidebarQuery.matches && elements.app.classList.contains('sidebar-open')) closeSidebar()
+      }
       return
     }
-    if (elements.infoDialog.open) return
     if (isEditing) return
     if (event.key === '/') {
       event.preventDefault()
-      elements.search.focus()
-      elements.search.select()
+      openSidebar()
       return
     }
     if (target instanceof HTMLButtonElement) return
+    if (target?.closest('[role="slider"]')) return
 
     if (/^\d$/.test(event.key) && !event.repeat) {
       event.preventDefault()
