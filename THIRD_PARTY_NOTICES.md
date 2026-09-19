@@ -26,6 +26,7 @@ TV Feed 的项目许可证、本文件以及 `third_party_licenses/` 也会一�
 
 | 组件 | 当前版本 | 用途 | 许可证 |
 | --- | ---: | --- | --- |
+| [@babel/parser](https://github.com/babel/babel) | 7.29.9 | 解析源码并检查模块依赖边界 | MIT |
 | [@types/node](https://github.com/DefinitelyTyped/DefinitelyTyped) | 24.13.3 | Node.js 类型定义 | MIT |
 | [electron-builder](https://github.com/electron-userland/electron-builder) | 26.15.3 | Electron 应用打包 | MIT |
 | [electron-vite](https://github.com/alex8088/electron-vite) | 5.0.0 | Electron 构建集成 | MIT |

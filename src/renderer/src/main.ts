@@ -8,19 +8,11 @@ import type {
 } from '../../shared/catalog-contracts.ts'
 import { displayCountryName } from '../../shared/countries.ts'
 import { hasVerifiedOfficialSource, isVerifiedOfficialSource } from '../../shared/official-sources.ts'
-import {
-  classifyPlaybackDiagnostic,
-  playbackDiagnosticInputForRemoteFailure,
-  type PlaybackDiagnostic
-} from '../../shared/playback-diagnostics.ts'
+import type { PlaybackDiagnostic } from '../../shared/playback-diagnostics.ts'
 import type { PlaybackMetricsSnapshot } from '../../shared/playback-metrics.ts'
 import type { SafetyStateSnapshot } from '../../shared/safety-contracts.ts'
-import { rankSources } from '../../shared/source-health.ts'
 import { StreamPlayer, type PlaybackState } from './player.ts'
-import {
-  PlaybackNetworkRecoveryGate,
-  type PlaybackNetworkTarget
-} from './playback-network-recovery.ts'
+import { PlaybackController } from './playback-controller.ts'
 import { ViewingState } from './viewing-state.ts'
 import { CatalogRequests } from './catalog-requests.ts'
 import { createCatalogStatusView } from './catalog-status-view.ts'
@@ -29,9 +21,6 @@ import { RemoteLogoController } from './remote-logo-controller.ts'
 import { SafetyClient } from './safety-client.ts'
 import { createChannelList, type ViewMode } from './channel-list.ts'
 import { createRotaryControl } from './rotary-control.ts'
-
-const NETWORK_RECOVERY_DELAY_MS = 3_000
-const NETWORK_RECOVERY_COOLDOWN_MS = 30_000
 
 const elements = {
   app: required<HTMLElement>('#app-shell'),
@@ -106,23 +95,15 @@ const elements = {
 const viewing = new ViewingState()
 const catalogRequests = new CatalogRequests()
 let catalog: Catalog | undefined
-let selectedChannelId = viewing.lastChannel
-let activeSourceIndex = 0
 let viewMode: ViewMode = 'all'
-let failedSources = new Set<string>()
-let healthRecordedForLoad = false
 let refreshInProgress = false
 let catalogSyncActive = false
 let familySafetyEnabled = false
 let remoteLogosEnabled = false
 let announcementTimer: number | undefined
 let fullscreenTransitionInProgress = false
-let playbackAttemptGeneration = 0
-let networkRecoveryTimer: number | undefined
-let networkRecoveryCheckGeneration: number | undefined
 const safetyClient = new SafetyClient(window.tvFeed)
 const remoteLogoController = new RemoteLogoController(window.tvFeed)
-const networkRecovery = new PlaybackNetworkRecoveryGate(NETWORK_RECOVERY_COOLDOWN_MS)
 const catalogStatus = createCatalogStatusView(elements, () => familySafetyEnabled)
 const {
   populateFacets, renderCatalogStats, updateCatalogStatus,
@@ -130,14 +111,36 @@ const {
 } = catalogStatus
 
 const player = new StreamPlayer(elements.video, {
-  onState: updatePlaybackState,
-  onFatal: (source, diagnostic) => void handleFatalSource(source, diagnostic),
-  onMetrics: handlePlaybackMetrics
+  onState: (state, message) => playback.handleState(state, message),
+  onFatal: (source, diagnostic) => void playback.handleFatal(source, diagnostic),
+  onMetrics: snapshot => playback.handleMetrics(snapshot)
+})
+
+const playback = new PlaybackController({
+  player, viewing, channel: getChannel,
+  isNetworkOnline: () => window.tvFeed.isNetworkOnline(),
+  canRecordHealth: () => !elements.video.paused && elements.video.readyState >= 2,
+  view: {
+    selected: renderSelectedChannel,
+    starting: (source, preserveDiagnostic) => {
+      elements.playerEmpty.hidden = true
+      elements.nowPlaying.hidden = false
+      elements.sourceQuality.textContent = source.quality
+      if (!preserveDiagnostic) clearPlaybackDiagnostic()
+      updateChannelHealth('checking')
+      updateSourceButtons()
+    },
+    state: updatePlaybackState,
+    diagnostic: renderPlaybackDiagnostic,
+    metrics: handlePlaybackMetrics,
+    recentChanged: () => { if (viewMode === 'recent') applyFilters() },
+    toast: showToast
+  }
 })
 
 const channelList = createChannelList({
   elements, viewing, catalog: () => catalog, viewMode: () => viewMode,
-  selectedChannelId: () => selectedChannelId, selectChannel, toggleFavorite,
+  selectedChannelId: () => playback.selectedChannelId, selectChannel, toggleFavorite,
   createLogo, createOfficialBadge, createStarIcon, emptyMessage, resetChannelNumberBuffer
 })
 
@@ -241,7 +244,7 @@ function bindEvents(): void {
       void window.tvFeed.windowAction(action).catch(() => showToast('窗口操作未完成，请重试'))
     })
   }
-  elements.favorite.addEventListener('click', () => toggleFavorite(selectedChannelId))
+  elements.favorite.addEventListener('click', () => toggleFavorite(playback.selectedChannelId))
   elements.pip.addEventListener('click', () => void togglePictureInPicture())
   elements.fullscreen.addEventListener('click', () => void toggleFullscreen())
   window.tvFeed.onPlayerFullscreenChange(syncFullscreenControl)
@@ -274,7 +277,7 @@ function bindEvents(): void {
   })
 
   document.addEventListener('keydown', keyboard.handleKeydown)
-  window.addEventListener('online', () => void retryPendingNetworkPlayback('online'))
+  window.addEventListener('online', () => void playback.retryPendingNetwork('online'))
   syncSidebarState()
   syncFullscreenControl(false)
   syncVolumeControl()
@@ -285,9 +288,9 @@ function applyCatalog(result: CatalogLoadResult): void {
   setCatalogFailureVisible(false)
   setCatalogControlsEnabled(true)
   elements.loadingList.hidden = true
-  const previous = getChannel(selectedChannelId)
-  const playingSourceId = player.hasSource ? previous?.sources[activeSourceIndex]?.id : undefined
-  if (viewing.useCatalog(result.catalog.source)) selectedChannelId = viewing.lastChannel
+  const previous = getChannel(playback.selectedChannelId)
+  const playingSourceId = player.hasSource ? previous?.sources[playback.activeSourceIndex]?.id : undefined
+  if (viewing.useCatalog(result.catalog.source)) playback.restoreSelection(viewing.lastChannel)
   catalog = result.catalog
   catalogRequests.index(catalog)
   elements.app.dataset.catalogSource = result.catalog.source
@@ -297,15 +300,15 @@ function applyCatalog(result: CatalogLoadResult): void {
   updateCatalogStatus(result.cacheStatus, result.catalog.channels.length)
 
   applyFilters()
-  const initial = getChannel(selectedChannelId) ?? channelList.channels[0] ?? result.catalog.channels[0]
+  const initial = getChannel(playback.selectedChannelId) ?? channelList.channels[0] ?? result.catalog.channels[0]
   if (initial) {
     const retainedSourceIndex = initial.sources.findIndex((source) => source.id === playingSourceId)
     if (initial.id === previous?.id && player.hasSource && retainedSourceIndex >= 0) {
-      activeSourceIndex = retainedSourceIndex
+      playback.retainSource(retainedSourceIndex)
       renderChannelDetail(initial)
       renderSources(initial)
     } else {
-      if (player.hasSource) player.stop()
+      if (player.hasSource) playback.stop()
       selectChannel(initial.id, false, false)
     }
     const initialIndex = channelList.channels.findIndex((channel) => channel.id === initial.id)
@@ -351,25 +354,16 @@ function renderVirtualRows(): void { channelList.render() }
 function ensureChannelVisible(index: number): void { channelList.ensureVisible(index) }
 
 function selectChannel(channelId: string, autoplay: boolean, rememberRecent: boolean): void {
-  const channel = getChannel(channelId)
-  if (!channel) return
-  playbackAttemptGeneration += 1
-  resetNetworkRecovery()
-  selectedChannelId = channel.id
-  activeSourceIndex = preferredSource(channel)?.index ?? 0
-  failedSources = new Set()
-  viewing.select(channel.id)
+  playback.selectChannel(channelId, autoplay, rememberRecent)
+}
 
-  if (rememberRecent) addRecent(channel.id)
+function renderSelectedChannel(channel: CatalogChannel, autoplay: boolean): void {
   renderVirtualRows()
   renderChannelDetail(channel)
   renderSources(channel)
   clearPlaybackDiagnostic()
   if (!autoplay) updateChannelHealth('not-checked')
   announce(`已选择频道 ${channel.name}`)
-
-  const preferred = preferredSource(channel)
-  if (autoplay && preferred) playSource(preferred.source, preferred.index)
   syncChannelDial()
   if (autoplay) closeSidebar()
 }
@@ -448,9 +442,8 @@ function disableRemoteLogos(): void {
 
 function enforceFamilyLocalState(): void {
   disableRemoteLogos()
-  selectedChannelId = ''
-  healthRecordedForLoad = false
-  player.stop()
+  playback.restoreSelection('')
+  playback.resetHealthObservation()
   if (!viewing.clearWatching()) throw new Error('观看记录未能完整清除，请重试或重新启动应用')
 }
 
@@ -466,7 +459,7 @@ async function updateFamilySafetyPreference(): Promise<void> {
   const generation = catalogRequests.begin()
   refreshInProgress = true
   // Withdraw every old selection route before an asynchronous safety transition.
-  player.stop()
+  playback.stop()
   catalog = undefined
   catalogRequests.clear()
   channelList.clear()
@@ -531,7 +524,7 @@ async function updateRemoteLogoPreference(): Promise<void> {
   try {
     applySafetyState(await safetyClient.setRemoteLogos(requested))
     renderVirtualRows()
-    const channel = getChannel(selectedChannelId)
+    const channel = getChannel(playback.selectedChannelId)
     if (channel) renderChannelDetail(channel)
 
     const message = remoteLogosEnabled
@@ -567,7 +560,7 @@ async function clearCatalogCacheFromSettings(): Promise<void> {
 
 function clearViewingDataFromSettings(): void {
   const cleared = viewing.clearAll()
-  healthRecordedForLoad = false
+  playback.resetHealthObservation()
   updateFavoriteButton()
   if (viewMode === 'favorites' || viewMode === 'recent') applyFilters()
   else renderVirtualRows()
@@ -587,172 +580,28 @@ function renderSources(channel: CatalogChannel): void {
     button.type = 'button'
     button.className = 'source-button'
     button.dataset.sourceButton = 'true'
-    button.setAttribute('aria-pressed', String(index === activeSourceIndex && player.hasSource))
+    button.setAttribute('aria-pressed', String(index === playback.activeSourceIndex && player.hasSource))
     const label = sourceLabel(source, index)
     const verifiedOfficial = isVerifiedOfficialSource(channel, source)
     button.append(document.createTextNode(label))
     if (verifiedOfficial) button.append(createOfficialBadge())
     button.title = verifiedOfficial ? `${label}（已核对官方主机）` : label
     button.setAttribute('aria-label', verifiedOfficial ? `${label}，官方源` : label)
-    button.addEventListener('click', () => {
-      resetNetworkRecovery()
-      failedSources = new Set()
-      playSource(source, index)
-    })
+    button.addEventListener('click', () => playback.selectSource(index))
     return button
   })
   elements.sourceList.replaceChildren(...nodes)
 }
 
-function playSource(source: CatalogSource, index: number, preserveDiagnostic = false): void {
-  const channel = getChannel(selectedChannelId)
-  if (!channel) return
-  playbackAttemptGeneration += 1
-  cancelPendingNetworkRecovery()
-  activeSourceIndex = index
-  addRecent(channel.id)
-  elements.playerEmpty.hidden = true
-  elements.nowPlaying.hidden = false
-  elements.sourceQuality.textContent = source.quality
-  if (!preserveDiagnostic) clearPlaybackDiagnostic()
-  updateChannelHealth('checking')
-  updateSourceButtons()
-  healthRecordedForLoad = false
-  player.load(source, channel.id, true)
-}
-
 function updateSourceButtons(): void {
   for (const [index, button] of [...elements.sourceList.querySelectorAll<HTMLButtonElement>('[data-source-button]')].entries()) {
-    button.setAttribute('aria-pressed', String(index === activeSourceIndex && player.hasSource))
+    button.setAttribute('aria-pressed', String(index === playback.activeSourceIndex && player.hasSource))
   }
-}
-
-function preferredSource(channel: CatalogChannel, excludedSourceIds: ReadonlySet<string> = new Set()) {
-  return rankSources(channel.sources, viewing.health, excludedSourceIds)[0]
 }
 
 function handlePlaybackMetrics(snapshot: PlaybackMetricsSnapshot): void {
   if (snapshot.sourceId) elements.video.dataset.playbackMetrics = JSON.stringify(snapshot)
   else delete elements.video.dataset.playbackMetrics
-  if (healthRecordedForLoad || !snapshot.sourceId || snapshot.startupMs === null || snapshot.mediaAdvancedSeconds < 15) return
-  const channel = getChannel(selectedChannelId)
-  const activeSource = channel?.sources[activeSourceIndex]
-  if (!activeSource || activeSource.id !== snapshot.sourceId || elements.video.paused || elements.video.readyState < 2) return
-
-  const observationMs = snapshot.mediaAdvancedSeconds * 1_000 + snapshot.stallDurationMs
-  const stallRatio = observationMs > 0 ? snapshot.stallDurationMs / observationMs : 0
-  if (stallRatio > 0.05 || (snapshot.droppedFrameRatio ?? 0) > 0.02) return
-  viewing.recordSuccess(activeSource.id, {
-    startupMs: snapshot.startupMs,
-    stallRatio
-  })
-  healthRecordedForLoad = true
-}
-
-async function handleFatalSource(failedSource: CatalogSource, diagnostic: PlaybackDiagnostic): Promise<void> {
-  const failedAttemptGeneration = playbackAttemptGeneration
-  let effectiveDiagnostic = diagnostic
-  if (shouldConfirmLocalNetwork(diagnostic)) {
-    try {
-      if (!await window.tvFeed.isNetworkOnline()) {
-        effectiveDiagnostic = classifyPlaybackDiagnostic(
-          playbackDiagnosticInputForRemoteFailure('network-unavailable')
-        )
-      }
-    } catch {
-      // A failed status check must not suppress the original source failure.
-    }
-  }
-
-  if (failedAttemptGeneration !== playbackAttemptGeneration) return
-  const channel = getChannel(selectedChannelId)
-  const current = channel?.sources[activeSourceIndex]
-  if (!channel || !current || current.id !== failedSource.id) return
-  renderPlaybackDiagnostic(effectiveDiagnostic)
-  if (effectiveDiagnostic.code === 'network-unavailable') {
-    updatePlaybackState('waiting-network', effectiveDiagnostic.message)
-    networkRecovery.suspend({ channelId: channel.id, sourceId: current.id, sourceIndex: activeSourceIndex })
-    updateChannelHealth('waiting-network')
-    scheduleNetworkRecoveryCheck()
-    showToast('网络暂时不可用，已暂停自动切换线路', 6000)
-    return
-  }
-  resetNetworkRecovery()
-  viewing.recordFailure(current.id)
-  failedSources.add(current.id)
-  const next = preferredSource(channel, failedSources)
-  if (next) {
-    showToast(`${effectiveDiagnostic.title}，正在尝试线路 ${next.index + 1}`)
-    playSource(next.source, next.index, true)
-    return
-  }
-  updatePlaybackState('error', `${effectiveDiagnostic.title}：${effectiveDiagnostic.message}`)
-  showToast(`所有线路均连接失败；最后一次：${effectiveDiagnostic.title}`, 6000)
-}
-
-function shouldConfirmLocalNetwork(diagnostic: PlaybackDiagnostic): boolean {
-  return diagnostic.code === 'dns-failure' ||
-    diagnostic.code === 'source-timeout' ||
-    diagnostic.code === 'source-offline'
-}
-
-function scheduleNetworkRecoveryCheck(): void {
-  if (networkRecoveryTimer !== undefined || !networkRecovery.shouldSchedule(Date.now())) return
-  networkRecoveryTimer = window.setTimeout(() => {
-    networkRecoveryTimer = undefined
-    void retryPendingNetworkPlayback('scheduled')
-  }, NETWORK_RECOVERY_DELAY_MS)
-}
-
-async function retryPendingNetworkPlayback(trigger: 'manual' | 'online' | 'scheduled'): Promise<boolean> {
-  const pending = networkRecovery.snapshot()
-  if (!pending) return false
-  if (networkRecoveryCheckGeneration === pending.generation) return true
-  networkRecoveryCheckGeneration = pending.generation
-
-  let confirmedOnline = false
-  try {
-    confirmedOnline = await window.tvFeed.isNetworkOnline()
-  } catch {
-    if (trigger === 'manual') showToast('暂时无法确认网络状态，请稍后再试')
-    return true
-  } finally {
-    if (networkRecoveryCheckGeneration === pending.generation) networkRecoveryCheckGeneration = undefined
-  }
-
-  const target = networkRecovery.claim(pending, confirmedOnline, currentNetworkTarget(), Date.now())
-  if (!confirmedOnline) {
-    if (trigger === 'manual') showToast('网络仍不可用，请检查 Wi-Fi、VPN 或系统代理', 6000)
-    return true
-  }
-  if (!target) return true
-
-  const channel = getChannel(target.channelId)
-  const source = channel?.sources[target.sourceIndex]
-  if (!channel || !source || source.id !== target.sourceId) return true
-  showToast('正在重新连接当前线路')
-  playSource(source, target.sourceIndex)
-  return true
-}
-
-function currentNetworkTarget(): PlaybackNetworkTarget | undefined {
-  const channel = getChannel(selectedChannelId)
-  const source = channel?.sources[activeSourceIndex]
-  return channel && source
-    ? { channelId: channel.id, sourceId: source.id, sourceIndex: activeSourceIndex }
-    : undefined
-}
-
-function cancelPendingNetworkRecovery(): void {
-  if (networkRecoveryTimer !== undefined) window.clearTimeout(networkRecoveryTimer)
-  networkRecoveryTimer = undefined
-  networkRecovery.cancelPending()
-}
-
-function resetNetworkRecovery(): void {
-  if (networkRecoveryTimer !== undefined) window.clearTimeout(networkRecoveryTimer)
-  networkRecoveryTimer = undefined
-  networkRecovery.reset()
 }
 
 function updatePlaybackState(state: PlaybackState, message: string): void {
@@ -773,7 +622,6 @@ function updatePlaybackState(state: PlaybackState, message: string): void {
   elements.playerStatusText.textContent = message || (state === 'paused' ? '已暂停' : '')
   if (state === 'loading') updateChannelHealth('checking')
   else if (state === 'playing') {
-    resetNetworkRecovery()
     updateChannelHealth('playable')
     clearPlaybackDiagnostic()
   } else if (state === 'paused') updateChannelHealth('connected')
@@ -786,35 +634,19 @@ function updatePlaybackState(state: PlaybackState, message: string): void {
     elements.nowPlaying.hidden = false
   }
   if (state === 'idle') {
-    playbackAttemptGeneration += 1
-    resetNetworkRecovery()
     updateSourceButtons()
   }
 }
 
 async function togglePlayback(): Promise<void> {
-  if (await retryPendingNetworkPlayback('manual')) return
-  const channel = getChannel(selectedChannelId) ?? channelList.channels[0]
-  if (!channel) {
+  if (!await playback.toggle(channelList.channels[0])) {
     showToast('当前筛选条件下没有可播放频道')
     openSidebar()
-    return
   }
-  if (channel.id !== selectedChannelId) selectChannel(channel.id, false, false)
-  if (!player.hasSource) {
-    failedSources = new Set()
-    const preferred = preferredSource(channel)
-    const source = channel.sources[activeSourceIndex] ?? preferred?.source
-    if (source) playSource(source, channel.sources.indexOf(source))
-    return
-  }
-  await player.toggle()
 }
 
 function stopPlayback(): void {
-  resetNetworkRecovery()
-  player.stop()
-  failedSources = new Set()
+  playback.stop()
   elements.playerEmpty.hidden = false
   clearPlaybackDiagnostic()
   updateChannelHealth('not-checked')
@@ -823,7 +655,7 @@ function stopPlayback(): void {
 
 function moveChannel(direction: -1 | 1): void {
   if (channelList.channels.length === 0) return
-  const currentIndex = channelList.channels.findIndex((channel) => channel.id === selectedChannelId)
+  const currentIndex = channelList.channels.findIndex((channel) => channel.id === playback.selectedChannelId)
   const base = currentIndex >= 0 ? currentIndex : direction > 0 ? -1 : 0
   const targetIndex = (base + direction + channelList.channels.length) % channelList.channels.length
   const channel = channelList.channels[targetIndex]
@@ -841,15 +673,10 @@ function toggleFavorite(channelId: string): void {
 }
 
 function updateFavoriteButton(): void {
-  const active = viewing.favorites.has(selectedChannelId)
+  const active = viewing.favorites.has(playback.selectedChannelId)
   elements.favorite.setAttribute('aria-pressed', String(active))
   const label = elements.favorite.querySelector('span')
   if (label) label.textContent = active ? '已收藏' : '收藏'
-}
-
-function addRecent(channelId: string): void {
-  viewing.remember(channelId)
-  if (viewMode === 'recent') applyFilters()
 }
 
 function setViewMode(mode: ViewMode): void {
@@ -923,7 +750,7 @@ function syncSidebarState(): void {
 }
 
 function syncChannelDial(): void {
-  const index = channelList.channels.findIndex((channel) => channel.id === selectedChannelId)
+  const index = channelList.channels.findIndex((channel) => channel.id === playback.selectedChannelId)
   channelDial.sync(Math.max(1, index + 1), channelList.channels.length)
   if (index < 0) elements.channelNumber.value = '—'
 }
@@ -972,7 +799,7 @@ function showCatalogFailure(failure: CatalogLoadFailure): void {
   delete elements.app.dataset.catalogCount
   channelList.clear()
   syncChannelDial()
-  player.stop()
+  playback.stop()
   catalogStatus.showFailure(failure)
   openSidebar()
   showToast(`${failure.title}，可以重新尝试或主动打开离线演示`, 7000)

@@ -56,6 +56,9 @@ jobs:
       - name: Launch Electron and verify the renderer
         run: xvfb-run --auto-servernum npm run smoke
 
+      - name: Verify profile single-instance ownership
+        run: xvfb-run --auto-servernum npm run verify:single-instance
+
       - name: Install FFmpeg for the generated MPEG-TS fixture
         run: |
           sudo apt-get update
@@ -96,6 +99,9 @@ jobs:
 
       - name: Verify native cross-process regressions and continuous playback
         run: npm run verify:regressions
+
+      - name: Verify profile single-instance ownership
+        run: npm run verify:single-instance
 
       - name: Verify family mode
         run: npm run smoke

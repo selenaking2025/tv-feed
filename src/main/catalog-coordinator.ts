@@ -13,7 +13,8 @@ import type {
   CatalogCacheCandidates,
   CatalogCacheRepositoryPort
 } from './catalog-cache.ts'
-import { fetchIptvOrgBundle } from './catalog-upstream.ts'
+import { createIptvOrgFetcher } from './catalog-upstream.ts'
+import { withAbort } from './operation-signal.ts'
 
 const DEFAULT_CACHE_TTL_MS = 12 * 60 * 60 * 1_000
 
@@ -32,7 +33,7 @@ export interface CatalogFetchResult {
 export interface CatalogCoordinatorOptions {
   cache: CatalogCacheRepositoryPort
   runtime?: Partial<CatalogRuntimeMode>
-  fetchCatalog?: (report: (progress: CatalogSyncProgressUpdate) => void) => Promise<CatalogFetchResult>
+  fetchCatalog?: (report: (progress: CatalogSyncProgressUpdate) => void, signal: AbortSignal) => Promise<CatalogFetchResult>
   now?: () => number
   cacheTtlMs?: number
 }
@@ -42,7 +43,10 @@ type ProgressReporter = (progress: CatalogSyncProgress) => void
 interface RunningOperation {
   operationId: string
   cacheEpoch: number
-  reporters: Set<ProgressReporter>
+  reporters: Map<symbol, ProgressReporter>
+  controller: AbortController
+  subscribers: number
+  completed: boolean
   latestProgress?: CatalogSyncProgress
   promise: Promise<CatalogLoadResult>
 }
@@ -73,47 +77,75 @@ export class CatalogCoordinator {
       useOfflineDemo: options.runtime?.useOfflineDemo ?? false,
       forceNetworkFailure: options.runtime?.forceNetworkFailure ?? false
     }
-    this.fetchCatalog = options.fetchCatalog ?? fetchAndTransformCatalog
+    const fetchUpstream = createIptvOrgFetcher()
+    this.fetchCatalog = options.fetchCatalog ?? ((report, signal) => fetchAndTransformCatalog(report, signal, fetchUpstream))
     this.now = options.now ?? Date.now
     this.cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS
   }
 
-  load(command: CatalogLoadCommand, scope: CatalogScope, report: ProgressReporter = () => undefined): Promise<CatalogLoadResult> {
-    const refreshKey = operationKey(scope, 'refresh')
-    const ownKey = operationKey(scope, command.intent)
+  load(command: CatalogLoadCommand, scope: CatalogScope, report: ProgressReporter = () => undefined,
+    signal?: AbortSignal): Promise<CatalogLoadResult> {
+    if (signal?.aborted) return Promise.reject(signal.reason)
+    const refreshKey = operationKey(scope, 'refresh', this.cacheEpoch)
+    const ownKey = operationKey(scope, command.intent, this.cacheEpoch)
     const joinable = command.intent === 'startup'
       ? this.inFlight.get(refreshKey) ?? this.inFlight.get(ownKey)
       : this.inFlight.get(ownKey)
-    if (joinable && joinable.cacheEpoch === this.cacheEpoch) {
-      joinable.reporters.add(report)
-      if (joinable.latestProgress) safelyReport(report, joinable.latestProgress)
-      return joinable.promise
+    if (joinable && !joinable.controller.signal.aborted) {
+      return this.subscribe(joinable, report, signal)
     }
 
     const sequence = ++this.operationSequence
     const operationId = `catalog-${sequence.toString(36)}-${this.now().toString(36)}`
-    const reporters = new Set<ProgressReporter>([report])
+    const controller = new AbortController()
     const running: RunningOperation = {
       operationId,
       cacheEpoch: this.cacheEpoch,
-      reporters,
+      reporters: new Map(), controller, subscribers: 0, completed: false,
       promise: Promise.resolve(undefined as never)
     }
     const operationEpoch = this.cacheEpoch
-    running.promise = this.execute(command, scope, operationId, sequence, operationEpoch, (update) => {
+    running.promise = this.execute(command, scope, operationId, sequence, operationEpoch, controller.signal, (update) => {
       const progress: CatalogSyncProgress = { operationId, ...update }
       running.latestProgress = progress
-      for (const listener of running.reporters) safelyReport(listener, progress)
+      for (const listener of running.reporters.values()) safelyReport(listener, progress)
     }).then((result) => {
       // Cache clearing revokes disk writes, not the usable in-memory result.
       // The sequence still prevents an older result replacing a newer catalog.
+      controller.signal.throwIfAborted()
       this.acceptCatalog(scope, sequence, result.catalog)
       return result
     }).finally(() => {
+      running.completed = true
       if (this.inFlight.get(ownKey) === running) this.inFlight.delete(ownKey)
     })
     this.inFlight.set(ownKey, running)
-    return running.promise
+    return this.subscribe(running, report, signal)
+  }
+
+  dispose(): void {
+    for (const operation of this.inFlight.values()) operation.controller.abort(new Error('目录任务已结束'))
+  }
+
+  private subscribe(operation: RunningOperation, report: ProgressReporter, signal?: AbortSignal): Promise<CatalogLoadResult> {
+    const token = Symbol()
+    operation.reporters.set(token, report)
+    operation.subscribers += 1
+    let attached = true
+    const detach = (): void => {
+      if (!attached) return
+      attached = false
+      signal?.removeEventListener('abort', detach)
+      operation.reporters.delete(token)
+      operation.subscribers -= 1
+      if (!operation.completed && operation.subscribers === 0) operation.controller.abort(new Error('目录任务已无等待者'))
+    }
+    if (operation.latestProgress) safelyReport(report, operation.latestProgress)
+    signal?.addEventListener('abort', detach, { once: true })
+    if (signal?.aborted) detach()
+    const result = signal ? withAbort(operation.promise, signal) : operation.promise
+    void result.then(detach, detach)
+    return result
   }
 
   loadOfflineDemo(scope: CatalogScope): CatalogLoadResult {
@@ -154,8 +186,10 @@ export class CatalogCoordinator {
     operationId: string,
     sequence: number,
     operationEpoch: number,
+    signal: AbortSignal,
     report: (progress: CatalogSyncProgressUpdate) => void
   ): Promise<CatalogLoadResult> {
+    signal.throwIfAborted()
     if (this.runtime.useAcceptanceCatalog && this.runtime.acceptanceUrl) {
       return {
         operationId,
@@ -167,6 +201,7 @@ export class CatalogCoordinator {
 
     report({ stage: 'checking-cache', message: '正在检查本机频道目录…' })
     const cache = await this.readCacheCandidates(scope, operationEpoch)
+    signal.throwIfAborted()
 
     if (this.runtime.useOfflineDemo) return this.offlineResult(scope, operationId)
     if (command.intent === 'startup' && cache.current && this.isFresh(cache.current.writtenAt)) {
@@ -182,7 +217,8 @@ export class CatalogCoordinator {
       if (this.runtime.forceNetworkFailure) {
         throw new CatalogSyncError('network', '验收模式模拟目录网络失败', true)
       }
-      const fetched = await this.fetchCatalog(report)
+      const fetched = await withAbort(this.fetchCatalog(report, signal), signal)
+      signal.throwIfAborted()
       const catalog = projectCatalog(fetched.catalog, scope)
       if (catalog.channels.length === 0) {
         throw new CatalogSyncError('invalid-data', '安全过滤后没有可用的真实频道', false)
@@ -195,6 +231,7 @@ export class CatalogCoordinator {
           catalog,
           sequence,
           operationEpoch,
+          signal,
           () => report({ stage: 'verifying-cache', message: '正在重新读取并验证刚写入的频道缓存…' })
         )
       } catch (error) {
@@ -210,6 +247,7 @@ export class CatalogCoordinator {
         warning: [...fetched.warnings, supersededWarning].filter(Boolean).join(' ')
       }
     } catch (error) {
+      signal.throwIfAborted()
       const fallback = cache.current ?? cache.legacy
       if (fallback) {
         return {
@@ -249,9 +287,11 @@ export class CatalogCoordinator {
     catalog: Catalog,
     sequence: number,
     operationEpoch: number,
+    signal: AbortSignal,
     onVerifying: () => void
   ): Promise<CacheWriteOutcome> {
     return this.enqueueCacheMutation(async () => {
+      signal.throwIfAborted()
       if (operationEpoch !== this.cacheEpoch || sequence < this.latestCommittedSequence) {
         return { superseded: true }
       }
@@ -282,9 +322,12 @@ export class CatalogSyncError extends Error {
 }
 
 async function fetchAndTransformCatalog(
-  report: (progress: CatalogSyncProgressUpdate) => void
+  report: (progress: CatalogSyncProgressUpdate) => void,
+  signal: AbortSignal,
+  fetchUpstream: ReturnType<typeof createIptvOrgFetcher>
 ): Promise<CatalogFetchResult> {
-  const upstream = await fetchIptvOrgBundle(report)
+  const upstream = await fetchUpstream(report, signal)
+  signal.throwIfAborted()
   report({ stage: 'processing', message: '正在安全清洗和整理频道目录…' })
   try {
     return { catalog: transformIptvData(upstream.bundle), warnings: upstream.warnings }
@@ -298,8 +341,8 @@ function projectCatalog(catalog: Catalog, scope: CatalogScope): Catalog {
   return scope === 'family' ? applyFamilySafetyAllowlist(denied) : denied
 }
 
-function operationKey(scope: CatalogScope, intent: CatalogLoadCommand['intent']): string {
-  return `${scope}:${intent}`
+function operationKey(scope: CatalogScope, intent: CatalogLoadCommand['intent'], epoch: number): string {
+  return `${scope}:${intent}:${epoch}`
 }
 
 function safelyReport(report: ProgressReporter, progress: CatalogSyncProgress): void {

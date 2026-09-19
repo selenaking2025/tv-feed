@@ -6,7 +6,15 @@ const MAX_SAFETY_STATE_BYTES = 8 * 1_024
 
 export interface SafetyStateStorePort {
   read(): Promise<SafetyStateSnapshot | undefined>
+  /** A failure after replacement must use SafetyStateCommitUncertainError. */
   write(state: SafetyStateSnapshot): Promise<SafetyStateSnapshot>
+}
+
+export class SafetyStateCommitUncertainError extends Error {
+  constructor(cause: unknown) {
+    super('家庭安全状态已替换，但尚未完成确认', { cause })
+    this.name = 'SafetyStateCommitUncertainError'
+  }
 }
 
 export class FileSafetyStateStore implements SafetyStateStorePort {
@@ -78,9 +86,13 @@ export async function writeSafetyStateAtomicAndVerify(
     const staged = await readSafetyStateFile(temporary)
     assertEquivalentState(state, staged, '临时家庭安全状态')
     await rename(temporary, path)
-    const persisted = await readSafetyStateFile(path)
-    assertEquivalentState(state, persisted, '正式家庭安全状态')
-    return persisted
+    try {
+      const persisted = await readSafetyStateFile(path)
+      assertEquivalentState(state, persisted, '正式家庭安全状态')
+      return persisted
+    } catch (error) {
+      throw new SafetyStateCommitUncertainError(error)
+    }
   } finally {
     await handle?.close().catch(() => undefined)
     await unlink(temporary).catch(() => undefined)

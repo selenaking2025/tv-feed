@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { extname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { findModuleBoundaryViolations } from './lib/module-boundaries.mjs'
 
 const FORBIDDEN_EXTENSIONS = new Set([
   '.dmg',
@@ -159,7 +160,7 @@ export function findRendererBoundaryViolations(entries) {
 }
 
 export function findArchitectureBoundaryViolations(entries) {
-  const violations = []
+  const violations = findModuleBoundaryViolations(entries)
   const architecture = entries.get('docs/ARCHITECTURE.md') ?? ''
   for (const marker of [
     '<!-- architecture-record:v1 -->',
@@ -193,15 +194,6 @@ export function findArchitectureBoundaryViolations(entries) {
     if (file !== 'src/shared/ipc-contract.ts') {
       ipcLiteral.lastIndex = 0
       if (ipcLiteral.test(text)) violations.push(`${file}: IPC 通道字面量只能在 ipc-contract.ts 声明`)
-    }
-    if (file.startsWith('src/shared/') && /from\s+['"](?:node:|electron|\.\.\/main\/)/.test(text)) {
-      violations.push(`${file}: shared 层不得依赖 Electron、Node 或 main 层`)
-    }
-    if (file.startsWith('src/renderer/') && /from\s+['"](?:node:|electron|\.\.\/\.\.\/main\/)/.test(text)) {
-      violations.push(`${file}: renderer 层不得依赖 Electron、Node 或 main 层`)
-    }
-    if (file.startsWith('src/renderer/') && /from\s+['"][^'"]*catalog\.ts['"]/.test(text)) {
-      violations.push(`${file}: renderer 不得直接执行目录安全投影`)
     }
     if (file.startsWith('src/renderer/') && file !== 'src/renderer/src/viewing-state.ts' &&
       /tvfeed:(?:favorites|recents|last-channel|source-health):v1/.test(text)) {
@@ -262,6 +254,7 @@ export function findWorkflowViolations(workflowText) {
     'npm test',
     'npm run build:app',
     'xvfb-run --auto-servernum npm run smoke',
+    'xvfb-run --auto-servernum npm run verify:single-instance',
     'sudo apt-get install --yes --no-install-recommends ffmpeg',
     'xvfb-run --auto-servernum npm run verify:hls:mpeg-ts',
     'xvfb-run --auto-servernum npm run verify:regressions',

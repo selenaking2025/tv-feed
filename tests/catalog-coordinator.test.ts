@@ -193,6 +193,73 @@ test('首次加载期间清除缓存后，返回的内存目录仍可播放但�
   assert.equal(coordinator.playbackSource('standard', channel.id, source.id).url, source.url)
 })
 
+test('合并任务的一个调用者取消不会打断其他调用者，取消后不再收到进度', async () => {
+  const cache = new MemoryCatalogCache()
+  const gate = deferred<void>()
+  let transportSignal: AbortSignal | undefined
+  let reportProgress = (): void => undefined
+  const coordinator = new CatalogCoordinator({ cache, fetchCatalog: async (report, signal) => {
+    transportSignal = signal
+    reportProgress = () => report({ stage: 'metadata', message: 'progress' })
+    await gate.promise
+    return { catalog: createOfflineSampleCatalog(), warnings: [] }
+  } })
+  const a = new AbortController(), b = new AbortController()
+  let aProgress = 0, bProgress = 0
+  const first = coordinator.load({ intent: 'refresh' }, 'standard', () => { aProgress += 1 }, a.signal)
+  const second = coordinator.load({ intent: 'startup' }, 'standard', () => { bProgress += 1 }, b.signal)
+  await nextTurn()
+  a.abort(new Error('first-left'))
+  await assert.rejects(first, /first-left/)
+  const before = aProgress
+  reportProgress()
+  assert.equal(aProgress, before)
+  assert.ok(bProgress > 1)
+  assert.equal(transportSignal?.aborted, false)
+  gate.resolve()
+  await second
+  assert.equal(cache.writes.length, 1)
+})
+
+test('最后一个调用者离开后中止上游，忽略迟到结果且不写缓存或接受目录', async () => {
+  const cache = new MemoryCatalogCache()
+  const gate = deferred<void>()
+  let signal: AbortSignal | undefined
+  const sample = createOfflineSampleCatalog()
+  const coordinator = new CatalogCoordinator({ cache, fetchCatalog: async (_report, current) => {
+    signal = current
+    await gate.promise
+    return { catalog: sample, warnings: [] }
+  } })
+  const caller = new AbortController()
+  const result = coordinator.load({ intent: 'refresh' }, 'standard', undefined, caller.signal)
+  await nextTurn()
+  caller.abort(new Error('last-left'))
+  await assert.rejects(result, /last-left/)
+  assert.equal(signal?.aborted, true)
+  gate.resolve()
+  await nextTurn()
+  assert.equal(cache.writes.length, 0)
+  assert.throws(() => coordinator.playbackSource('standard', sample.channels[0]!.id, sample.channels[0]!.sources[0]!.id))
+})
+
+test('退出时同时取消当前和旧缓存纪元的任务', async () => {
+  const signals: AbortSignal[] = []
+  const coordinator = new CatalogCoordinator({ cache: new MemoryCatalogCache(), fetchCatalog: async (_report, signal) => {
+    signals.push(signal)
+    return new Promise(() => undefined)
+  } })
+  const old = coordinator.load({ intent: 'refresh' }, 'standard')
+  await nextTurn()
+  await coordinator.invalidateCache()
+  const current = coordinator.load({ intent: 'refresh' }, 'standard')
+  await nextTurn()
+  coordinator.dispose()
+  await Promise.all([assert.rejects(old), assert.rejects(current)])
+  assert.equal(signals.length, 2)
+  assert.ok(signals.every(signal => signal.aborted))
+})
+
 interface Deferred<T> {
   promise: Promise<T>
   resolve(value: T): void

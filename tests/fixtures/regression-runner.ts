@@ -28,6 +28,7 @@ let abortedRequests = 0
 let networkOnline = true
 let mediaMode: 'forbidden' | 'play' | 'held' = 'forbidden'
 let fetches = 0
+let abortedCatalogs = 0
 let fetchNext: (report: (update: CatalogSyncProgressUpdate) => void) => Promise<CatalogFetchResult> = async () => {
   throw new SecureNetworkError('network', 'Fixture unavailable', false)
 }
@@ -39,7 +40,11 @@ const catalog = new CatalogCoordinator({
     write: async (_scope, value, verify) => { cacheWrites.push(value); verify?.(); return value },
     clear: async () => true
   },
-  fetchCatalog: (report) => { fetches += 1; return fetchNext(report) }
+  fetchCatalog: (report, signal) => {
+    fetches += 1
+    signal.addEventListener('abort', () => { abortedCatalogs += 1 }, { once: true })
+    return fetchNext(report)
+  }
 })
 
 const transport: SecureFetchDependencies = {
@@ -267,7 +272,8 @@ async function verifyCatalogOrdering(): Promise<void> {
     assert.ok(!(await evaluate('document.querySelector("#catalog-state").textContent') as string).includes('Old progress'))
     assert.equal(cacheWrites.at(-1)?.channels[0]?.name, 'Audit NEW')
   }
-  results.catalogOrdering = { passed: true, lateSuccessIgnored: true, lateFailureIgnored: true, lateProgressIgnored: true }
+  assert.ok(abortedCatalogs >= 2, '旧页面或被替代的目录任务没有取消上游')
+  results.catalogOrdering = { passed: true, lateSuccessIgnored: true, lateFailureIgnored: true, lateProgressIgnored: true, abortedCatalogs }
   report('启动与刷新交错、迟到结果与进度')
 }
 

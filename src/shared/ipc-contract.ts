@@ -45,7 +45,7 @@ export const IPC_CHANNELS = Object.freeze({
 })
 
 export interface TvFeedBridge {
-  platform: NodeJS.Platform
+  platform: 'aix' | 'android' | 'darwin' | 'freebsd' | 'haiku' | 'linux' | 'openbsd' | 'sunos' | 'win32' | 'cygwin' | 'netbsd'
   initializeSafetyState(preferences: LegacySafetyPreferences): Promise<SafetyStateSnapshot>
   setFamilySafety(enabled: boolean): Promise<SafetyTransitionResult>
   setRemoteLogos(enabled: boolean): Promise<SafetyStateSnapshot>

@@ -39,7 +39,7 @@ TV Feed 与 iptv-org、电视台、频道及内容权利人没有隶属、赞助
 
 ## 开发
 
-现行权威边界、目录并发规则、家庭安全恢复流程、缓存 V2 迁移和五阶段优化记录见 [架构文档](docs/ARCHITECTURE.md)。
+现行权威边界、目录并发规则、家庭安全恢复流程和缓存 V2 迁移见 [架构文档](docs/ARCHITECTURE.md)。本次五项优化的实施与验证见 [架构优化清单](docs/ARCHITECTURE_OPTIMIZATIONS.md)。
 
 ```bash
 npm ci
@@ -65,6 +65,7 @@ npm run typecheck
 npm test
 npm run build
 npm run smoke
+npm run verify:single-instance
 npm run verify:hls:mpeg-ts
 npm run verify:regressions
 npm run verify:public-release
@@ -73,6 +74,8 @@ npm run verify:public-release
 私有仓库的 GitHub Actions 会在每次推送到 `main` 和每个 Pull Request 上使用官方 npm registry 执行全新 `npm ci`、仓库边界检查、类型检查、单元测试和生产构建。构建后还会在虚拟显示器中真正启动 Electron、验证 renderer，并运行离线 MPEG-TS 交错 A/B；因此 Electron npm 包存在但二进制缺失时不会被“只构建”掩盖。仓库边界检查会拒绝频道缓存、M3U、安装包、未批准图片、常见凭据、非官方依赖下载地址，以及渲染进程直接联网等回归。
 
 CI 还会在 macOS 原生环境验证家庭模式、组合回归和打包后的实际启动。Linux 作业使用 `build:app` 完成已经通过类型检查和测试后的纯构建，避免重复执行相同检查。
+
+`npm run verify:single-instance` 使用临时用户目录检查重复启动、窗口恢复和安全设置保持；在 macOS 还检查关闭窗口后的重新打开。同一个用户目录只由一个应用进程写入，不同测试目录可以独立运行。
 
 `npm run verify:regressions` 需要 FFmpeg。它使用临时目录和生成的视频信号，真实运行 renderer、preload、IPC 与主进程服务，验证旋钮拖动与取消、电源开关、演示记录隔离、家庭切换拦截、失败后重试、目录请求乱序、断网恢复和 60 秒连续播放。不会读取日常使用的观看数据，也不依赖第三方直播源。只检查交互问题时可用 `npm run verify:regressions -- --behavior-only` 跳过视频生成和连续播放。
 

@@ -3,8 +3,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import fs from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import {
-  readSafetyStateFile,
+  readSafetyStateFile, SafetyStateCommitUncertainError,
   writeSafetyStateAtomicAndVerify
 } from '../src/main/safety-state-store.ts'
 import type { SafetyStateSnapshot } from '../src/shared/safety-contracts.ts'
@@ -40,5 +42,28 @@ test('家庭安全状态使用原子写入并在正式路径复读完整状态',
     assert.deepEqual(await readSafetyStateFile(path), validState)
   } finally {
     await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('正式文件替换后读取失败明确报告提交待确认，文件仍可恢复', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'tv-feed-safety-readback-'))
+  const path = join(directory, 'state.json')
+  const originalOpen = fs.open
+  const originalRename = fs.rename
+  let committed = false
+  try {
+    fs.rename = async (from, to) => { await originalRename(from, to); committed = true }
+    fs.open = async (...args: Parameters<typeof fs.open>) => {
+      if (committed && args[0] === path && args[1] === 'r') throw new Error('EIO')
+      return originalOpen(...args)
+    }
+    syncBuiltinESMExports()
+    await assert.rejects(writeSafetyStateAtomicAndVerify(path, validState), SafetyStateCommitUncertainError)
+  } finally {
+    fs.open = originalOpen
+    fs.rename = originalRename
+    syncBuiltinESMExports()
+    try { assert.deepEqual(await readSafetyStateFile(path), validState) }
+    finally { await rm(directory, { recursive: true, force: true }) }
   }
 })

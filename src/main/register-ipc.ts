@@ -21,6 +21,11 @@ export interface RegisterIpcOptions {
 
 export function registerIpcHandlers(options: RegisterIpcOptions): void {
   const trust = (url: string): void => assertTrustedSender(url, options.runtime)
+  const catalogCallers = new Map<number, AbortController>()
+  const cancelCatalog = (senderId: number): void => {
+    catalogCallers.get(senderId)?.abort(new Error('目录请求已被替代或窗口已关闭'))
+    catalogCallers.delete(senderId)
+  }
 
   ipcMain.handle(IPC_CHANNELS.safetyInitialize, async (event, input: unknown) => {
     trust(event.senderFrame?.url ?? '')
@@ -29,6 +34,7 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
   ipcMain.handle(IPC_CHANNELS.safetySetFamily, (event, enabled: unknown) => {
     trust(event.senderFrame?.url ?? '')
     if (typeof enabled !== 'boolean') throw new Error('家庭安全状态必须是布尔值')
+    cancelCatalog(event.sender.id)
     return options.safety.setFamilySafety(enabled)
   })
   ipcMain.handle(IPC_CHANNELS.safetySetRemoteLogos, (event, enabled: unknown) => {
@@ -46,10 +52,20 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
 
   ipcMain.handle(IPC_CHANNELS.catalogLoad, async (event, input: unknown): Promise<CatalogLoadResponse> => {
     trust(event.senderFrame?.url ?? '')
+    const controller = new AbortController()
+    const cancel = (): void => controller.abort(new Error('目录请求所属页面已结束'))
+    const navigate = (details: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>): void => {
+      if (details.isMainFrame && !details.isSameDocument) cancel()
+    }
     try {
       const scope = options.safety.catalogScope()
       const command = parseCatalogLoadCommand(input)
-      const result = await options.catalog.load(
+      const previous = catalogCallers.get(event.sender.id)
+      catalogCallers.set(event.sender.id, controller)
+      event.sender.once('destroyed', cancel)
+      event.sender.once('render-process-gone', cancel)
+      event.sender.on('did-start-navigation', navigate)
+      const loading = options.catalog.load(
         command,
         scope,
         (progress) => {
@@ -57,18 +73,28 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
             ...progress,
             ...(command.requestId ? { requestId: command.requestId } : {})
           })
-        }
+        },
+        controller.signal
       )
+      // Subscribe before withdrawing the old caller so shared work can survive.
+      previous?.abort(new Error('目录请求已被较新的请求替代'))
+      const result = await loading
       // Never return a standard projection after family mode became
       // authoritative while the asynchronous load was in flight.
       options.safety.assertCatalogScope(scope)
       return { ok: true, result }
     } catch (error) {
       return { ok: false, failure: toCatalogLoadFailure(error) }
+    } finally {
+      event.sender.removeListener('destroyed', cancel)
+      event.sender.removeListener('render-process-gone', cancel)
+      event.sender.removeListener('did-start-navigation', navigate)
+      if (catalogCallers.get(event.sender.id) === controller) catalogCallers.delete(event.sender.id)
     }
   })
   ipcMain.handle(IPC_CHANNELS.catalogOfflineDemo, (event) => {
     trust(event.senderFrame?.url ?? '')
+    cancelCatalog(event.sender.id)
     return options.catalog.loadOfflineDemo(options.safety.catalogScope())
   })
   ipcMain.handle(IPC_CHANNELS.catalogClearCache, (event) => {

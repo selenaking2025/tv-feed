@@ -118,10 +118,43 @@ test('基本密钥扫描识别常见凭据而不把普通配置误报为密钥',
   assert.match(findSecretViolations(new Map([['unsafe.ts', `const value = '${fakeToken}'`]])).join('\n'), /GitHub token/)
 })
 
+test('依赖门禁解析动态、裸 Node、深层路径、重导出和副作用导入', () => {
+  const cases = [
+    ['src/renderer/src/probe.ts', "const load = () => import('node:fs/promises')"],
+    ['src/renderer/src/probe.ts', "import { readFile } from 'fs/promises'"],
+    ['src/renderer/src/nested/probe.ts', "import { CatalogCoordinator } from '../../../main/catalog-coordinator.ts'"],
+    ['src/shared/probe.ts', "import '../main/secure-network.ts'"],
+    ['src/shared/probe.ts', "export * from '../main/secure-network.ts'"],
+    ['src/renderer/src/probe.ts', "const fs = require('node:fs')"],
+    ['src/renderer/src/probe.ts', "type App = import('electron').App"],
+    ['src/renderer/src/probe.ts', 'const name = "module"; import(name)'],
+    ['src/renderer/src/probe.ts', "import { x } from '@main/hidden'"],
+    ['src/renderer/src/probe.ts', "import '../../../scripts/smoke-driver.mjs'"],
+    ['src/main/probe.ts', "import '../renderer/src/main.ts'"]
+  ] as const
+  for (const [file, code] of cases) {
+    assert.ok(findArchitectureBoundaryViolations(new Map([[file, code]])).some(message => message.startsWith(file)), code)
+  }
+  const valid = new Map([
+    ['src/renderer/src/probe.ts', "import type { Catalog } from '../../shared/catalog-contracts.ts'; const text = \"import('node:fs')\""],
+    ['src/shared/catalog-contracts.ts', 'export type Catalog = {}']
+  ])
+  assert.ok(!findArchitectureBoundaryViolations(valid).some(message => message.startsWith('src/')))
+  valid.set('src/shared/catalog-contracts.ts', "export * from './catalog.ts'")
+  assert.ok(findArchitectureBoundaryViolations(valid).some(message => message.includes('间接执行目录安全投影')))
+  const emittedExtensions = new Map([
+    ['src/renderer/src/probe.ts', "import '../../shared/bridge.js'"],
+    ['src/shared/bridge.ts', "export * from './catalog.js'"],
+    ['src/shared/catalog.ts', 'export const transform = () => undefined']
+  ])
+  assert.ok(findArchitectureBoundaryViolations(emittedExtensions).some(message => message.includes('间接执行目录安全投影')))
+})
+
 test('CI 门禁要求最小权限、完整提交哈希和完整验证命令', () => {
-  const safeWorkflow = `permissions:\n  contents: read\nsteps:\n  - uses: actions/checkout@${'a'.repeat(40)}\n  - run: npm ci --registry=https://registry.npmjs.org\n  - run: sudo chown root:root node_modules/electron/dist/chrome-sandbox\n  - run: sudo chmod 4755 node_modules/electron/dist/chrome-sandbox\n  - run: npm run verify:repository\n  - run: npm run verify:public-release:static\n  - run: npm run typecheck\n  - run: npm test\n  - run: npm run build:app\n  - run: xvfb-run --auto-servernum npm run smoke\n  - run: sudo apt-get install --yes --no-install-recommends ffmpeg\n  - run: xvfb-run --auto-servernum npm run verify:hls:mpeg-ts\n  - run: xvfb-run --auto-servernum npm run verify:regressions\n  - runs-on: macos-15\n  - run: npx --no-install electron-builder --mac dir --arm64 --publish never\n  - env: { }\n    TVFEED_EXPECT_PACKAGED: '1'\n`
+  const safeWorkflow = `permissions:\n  contents: read\nsteps:\n  - uses: actions/checkout@${'a'.repeat(40)}\n  - run: npm ci --registry=https://registry.npmjs.org\n  - run: sudo chown root:root node_modules/electron/dist/chrome-sandbox\n  - run: sudo chmod 4755 node_modules/electron/dist/chrome-sandbox\n  - run: npm run verify:repository\n  - run: npm run verify:public-release:static\n  - run: npm run typecheck\n  - run: npm test\n  - run: npm run build:app\n  - run: xvfb-run --auto-servernum npm run smoke\n  - run: xvfb-run --auto-servernum npm run verify:single-instance\n  - run: sudo apt-get install --yes --no-install-recommends ffmpeg\n  - run: xvfb-run --auto-servernum npm run verify:hls:mpeg-ts\n  - run: xvfb-run --auto-servernum npm run verify:regressions\n  - runs-on: macos-15\n  - run: npx --no-install electron-builder --mac dir --arm64 --publish never\n  - env: { }\n    TVFEED_EXPECT_PACKAGED: '1'\n`
   assert.deepEqual(findWorkflowViolations(safeWorkflow), [])
   assert.match(findWorkflowViolations(safeWorkflow.replace('xvfb-run --auto-servernum npm run verify:regressions', '')).join('\n'), /verify:regressions/)
+  assert.match(findWorkflowViolations(safeWorkflow.replace('xvfb-run --auto-servernum npm run verify:single-instance', '')).join('\n'), /verify:single-instance/)
   assert.match(findWorkflowViolations(safeWorkflow.replace('runs-on: macos-15', '')).join('\n'), /macos-15/)
   assert.match(findWorkflowViolations(safeWorkflow.replace(`@${'a'.repeat(40)}`, '@v6')).join('\n'), /完整提交哈希/)
 })

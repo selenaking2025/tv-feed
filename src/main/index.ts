@@ -31,56 +31,80 @@ registerPrivilegedScheme()
 
 let mainWindow: BrowserWindow | null = null
 let remoteResources: RemoteResourceBroker | undefined
+let catalogService: ReturnType<typeof createCatalogService> | undefined
 let smokeHandled = false
+let primaryReady = false
 
-app.whenReady().then(async () => {
-  const catalog = createCatalogService(app.getPath('userData'), app.getVersion(), runtime)
-  let resources: RemoteResourceBroker | undefined
-  const safety = new SafetyCoordinator({
-    store: new FileSafetyStateStore(join(app.getPath('userData'), 'safety-state-v1.json')),
-    invalidateCatalog: () => catalog.invalidateCache(),
-    cancelRemoteLogos: () => resources?.cancelKind('logo'),
-    revokePlayback: () => resources?.revokePlayback()
-  })
-  resources = new RemoteResourceBroker({
-    assertAllowed: (kind) => safety.assertRemoteResourceAllowed(kind),
-    isNetworkOnline: () => net.isOnline(),
-    rendererUrl: runtime.rendererUrl
-  })
-  remoteResources = resources
-
-  await registerAppProtocol(runtime, resources)
-  configureSystemProxyResolver((url) => session.defaultSession.resolveProxy(url))
-  resources.start()
-  hardenSession(runtime)
-  registerIpcHandlers({
-    appVersion: app.getVersion(),
-    runtime,
-    catalog,
-    safety,
-    resources,
-    isNetworkOnline: () => net.isOnline(),
-    onRendererReady: (webContents) => {
-      if (!runtime.smoke.enabled || smokeHandled) return
-      smokeHandled = true
-      void runConfiguredSmokeInspection(webContents)
-    }
-  })
-  createMainWindow(resources)
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow(resources)
-  })
-}).catch((error) => {
-  process.stderr.write(`TVFEED_STARTUP_ERROR ${sanitizeRuntimeDiagnostic(error instanceof Error ? error.message : String(error))}\n`)
+// Electron scopes the lock to userData. Acquire it before creating any stores
+// or Chromium sessions so the process-local writers remain the only writers.
+if (!app.requestSingleInstanceLock()) {
   app.quit()
-})
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      if (primaryReady && remoteResources) createMainWindow(remoteResources)
+      return
+    }
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  })
+  void startPrimaryInstance()
+}
+
+async function startPrimaryInstance(): Promise<void> {
+  await app.whenReady().then(async () => {
+    const catalog = createCatalogService(app.getPath('userData'), app.getVersion(), runtime)
+    catalogService = catalog
+    let resources: RemoteResourceBroker | undefined
+    const safety = new SafetyCoordinator({
+      store: new FileSafetyStateStore(join(app.getPath('userData'), 'safety-state-v1.json')),
+      invalidateCatalog: () => catalog.invalidateCache(),
+      cancelRemoteLogos: () => resources?.cancelKind('logo'),
+      revokePlayback: () => resources?.revokePlayback()
+    })
+    resources = new RemoteResourceBroker({
+      assertAllowed: (kind) => safety.assertRemoteResourceAllowed(kind),
+      isNetworkOnline: () => net.isOnline(),
+      rendererUrl: runtime.rendererUrl
+    })
+    remoteResources = resources
+
+    await registerAppProtocol(runtime, resources)
+    configureSystemProxyResolver((url) => session.defaultSession.resolveProxy(url))
+    resources.start()
+    hardenSession(runtime)
+    registerIpcHandlers({
+      appVersion: app.getVersion(),
+      runtime,
+      catalog,
+      safety,
+      resources,
+      isNetworkOnline: () => net.isOnline(),
+      onRendererReady: (webContents) => {
+        if (!runtime.smoke.enabled || smokeHandled) return
+        smokeHandled = true
+        void runConfiguredSmokeInspection(webContents)
+      }
+    })
+    primaryReady = true
+    createMainWindow(resources)
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createMainWindow(resources)
+    })
+  }).catch((error) => {
+    process.stderr.write(`TVFEED_STARTUP_ERROR ${sanitizeRuntimeDiagnostic(error instanceof Error ? error.message : String(error))}\n`)
+    app.quit()
+  })
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin' || runtime.smoke.enabled) app.quit()
 })
 
 app.on('before-quit', () => {
+  catalogService?.dispose()
   remoteResources?.dispose()
   remoteResources = undefined
   destroySecureConnections()

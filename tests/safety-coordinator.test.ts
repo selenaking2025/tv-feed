@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SafetyCoordinator } from '../src/main/safety-coordinator.ts'
-import type { SafetyStateStorePort } from '../src/main/safety-state-store.ts'
+import { SafetyStateCommitUncertainError, type SafetyStateStorePort } from '../src/main/safety-state-store.ts'
 import type { SafetyStateSnapshot } from '../src/shared/safety-contracts.ts'
 
 class MemorySafetyStore implements SafetyStateStorePort {
@@ -109,6 +109,76 @@ test('崩溃遗留的缓存清理标记会在下次初始化重试，失败时�
   const state = await recovered.initialize({ familySafety: false, remoteLogos: false })
   assert.equal(state.pendingCatalogInvalidation, false)
   assert.equal(state.familySafety, true)
+})
+
+test('提交后确认失败会先撤权，再复读已提交状态并继续清理', async () => {
+  const store = new MemorySafetyStore()
+  const events: string[] = []
+  const coordinator = new SafetyCoordinator({
+    store,
+    invalidateCatalog: async () => { events.push('clear'); return true },
+    cancelRemoteLogos: () => { events.push('cancel') },
+    revokePlayback: () => { events.push('revoke') }
+  })
+  await coordinator.initialize({ familySafety: false, remoteLogos: true })
+  const write = store.write.bind(store)
+  let failOnce = true
+  store.write = async state => {
+    const persisted = await write(state)
+    if (failOnce) { failOnce = false; throw new SafetyStateCommitUncertainError(new Error('EIO')) }
+    return persisted
+  }
+  store.read = async () => { events.push('read'); return store.state ? { ...store.state } : undefined }
+  const result = await coordinator.setFamilySafety(true)
+  assert.equal(result.state.familySafety, true)
+  assert.equal(result.state.pendingCatalogInvalidation, false)
+  assert.ok(events.indexOf('revoke') < events.indexOf('read'))
+  assert.throws(() => coordinator.assertRemoteResourceAllowed('logo'))
+})
+
+test('持续复读失败或状态不匹配时关闭所有准入，重试后从磁盘恢复而不覆盖', async () => {
+  const store = new MemorySafetyStore()
+  const coordinator = new SafetyCoordinator({ store, invalidateCatalog: async () => true,
+    cancelRemoteLogos: () => undefined, revokePlayback: () => undefined })
+  await coordinator.initialize({ familySafety: false, remoteLogos: true })
+  const write = store.write.bind(store)
+  store.write = async state => {
+    await write(state)
+    throw new SafetyStateCommitUncertainError(new Error('EIO'))
+  }
+  store.read = async () => { throw new Error('EIO') }
+  await assert.rejects(coordinator.setFamilySafety(true), /无法确认/)
+  assert.throws(() => coordinator.catalogScope(), /尚未确认/)
+  for (const kind of ['logo', 'hls-playlist', 'hls-binary'] as const) {
+    assert.throws(() => coordinator.assertRemoteResourceAllowed(kind), /尚未确认/)
+  }
+  const committed = { ...store.state! }
+  store.read = async () => ({ ...committed, familySafety: false })
+  await assert.rejects(coordinator.initialize({ familySafety: false, remoteLogos: true }), /不一致/)
+  assert.deepEqual(store.state, committed)
+  store.write = write
+  store.read = async () => ({ ...store.state! })
+  const recovered = await coordinator.initialize({ familySafety: false, remoteLogos: true })
+  assert.equal(recovered.familySafety, true)
+  assert.equal(recovered.remoteLogos, false)
+  assert.equal(recovered.pendingViewingDataClear, true)
+  assert.equal(recovered.pendingCatalogInvalidation, false)
+  await assert.rejects(coordinator.setFamilySafety(false), /未确认清除/)
+  await coordinator.acknowledgeViewingDataClear(recovered.transitionId)
+  assert.equal((await coordinator.setFamilySafety(false)).state.familySafety, false)
+})
+
+test('提交前失败保留已确认状态，后续写入可以重试', async () => {
+  const store = new MemorySafetyStore()
+  const coordinator = new SafetyCoordinator({ store, invalidateCatalog: async () => true,
+    cancelRemoteLogos: () => undefined, revokePlayback: () => undefined })
+  const initial = await coordinator.initialize({ familySafety: false, remoteLogos: true })
+  const write = store.write.bind(store)
+  store.write = async () => { throw new Error('ENOSPC') }
+  await assert.rejects(coordinator.setFamilySafety(true), /ENOSPC/)
+  assert.deepEqual(coordinator.snapshot(), initial)
+  store.write = write
+  assert.equal((await coordinator.setFamilySafety(true)).state.familySafety, true)
 })
 
 interface Deferred<T> {

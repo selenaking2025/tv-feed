@@ -5,7 +5,7 @@ import type {
   SafetyTransitionResult
 } from '../shared/safety-contracts.ts'
 import type { CatalogScope } from '../shared/catalog-contracts.ts'
-import type { SafetyStateStorePort } from './safety-state-store.ts'
+import { SafetyStateCommitUncertainError, type SafetyStateStorePort } from './safety-state-store.ts'
 
 export interface SafetyCoordinatorOptions {
   store: SafetyStateStorePort
@@ -18,6 +18,7 @@ export interface SafetyCoordinatorOptions {
 export class SafetyCoordinator {
   private readonly options: SafetyCoordinatorOptions
   private state: SafetyStateSnapshot | undefined
+  private uncertainCommit: SafetyStateSnapshot | undefined
   private transitionSequence = 0
   private mutationTail: Promise<void> = Promise.resolve()
   private readonly now: () => number
@@ -29,13 +30,14 @@ export class SafetyCoordinator {
 
   initialize(preferences: LegacySafetyPreferences): Promise<SafetyStateSnapshot> {
     return this.enqueue(async () => {
+      await this.reconcileUncertainCommit()
       if (!this.state) {
         const persisted = await this.options.store.read()
         if (persisted) {
           this.state = persisted
         } else {
           const familySafety = preferences.familySafety
-          this.state = await this.options.store.write({
+          await this.persist({
             schemaVersion: 1,
             revision: 1,
             familySafety,
@@ -46,7 +48,8 @@ export class SafetyCoordinator {
           })
         }
       }
-      if (this.state.familySafety || !this.state.remoteLogos) this.options.cancelRemoteLogos()
+      const state = this.requireState()
+      if (state.familySafety || !state.remoteLogos) this.options.cancelRemoteLogos()
       await this.reconcileCatalogInvalidation()
       return cloneState(this.requireState())
     })
@@ -54,6 +57,7 @@ export class SafetyCoordinator {
 
   setFamilySafety(enabled: boolean): Promise<SafetyTransitionResult> {
     return this.enqueue(async () => {
+      await this.reconcileUncertainCommit()
       const current = this.requireState()
       if (enabled === current.familySafety) {
         await this.reconcileCatalogInvalidation()
@@ -95,6 +99,7 @@ export class SafetyCoordinator {
 
   setRemoteLogos(enabled: boolean): Promise<SafetyStateSnapshot> {
     return this.enqueue(async () => {
+      await this.reconcileUncertainCommit()
       const current = this.requireState()
       if (enabled && current.familySafety) throw new Error('家庭安全模式下不能开启远程台标')
       if (enabled === current.remoteLogos) return cloneState(current)
@@ -110,6 +115,7 @@ export class SafetyCoordinator {
 
   acknowledgeViewingDataClear(transitionId: string): Promise<SafetyStateSnapshot> {
     return this.enqueue(async () => {
+      await this.reconcileUncertainCommit()
       const current = this.requireState()
       if (transitionId !== current.transitionId) throw new Error('家庭安全清理确认已过期')
       if (!current.pendingViewingDataClear) return cloneState(current)
@@ -159,14 +165,41 @@ export class SafetyCoordinator {
   }
 
   private requireState(): SafetyStateSnapshot {
+    if (this.uncertainCommit) throw new Error('家庭安全设置尚未确认，请重试设置或重新启动应用')
     if (!this.state) throw new Error('家庭安全状态尚未初始化')
     return this.state
   }
 
   private async persist(next: SafetyStateSnapshot): Promise<SafetyStateSnapshot> {
-    const persisted = await this.options.store.write(next)
+    try {
+      this.state = await this.options.store.write(next)
+    } catch (error) {
+      if (!(error instanceof SafetyStateCommitUncertainError)) throw error
+      // A rejected write is not evidence that the old state is still durable.
+      // Revoke admission before the first asynchronous reconciliation attempt.
+      this.uncertainCommit = { ...next }
+      this.options.cancelRemoteLogos()
+      this.options.revokePlayback()
+      await this.reconcileUncertainCommit()
+    }
+    return this.requireState()
+  }
+
+  private async reconcileUncertainCommit(): Promise<void> {
+    const expected = this.uncertainCommit
+    if (!expected) return
+    let persisted: SafetyStateSnapshot | undefined
+    try {
+      persisted = await this.options.store.read()
+    } catch {
+      throw new Error('家庭安全设置暂时无法确认，已暂停远程资源，请重试设置或重新启动应用')
+    }
+    if (!persisted || Object.keys(expected).some(key =>
+      persisted[key as keyof SafetyStateSnapshot] !== expected[key as keyof SafetyStateSnapshot])) {
+      throw new Error('家庭安全设置复核不一致，已暂停远程资源，请重新启动应用')
+    }
     this.state = persisted
-    return persisted
+    this.uncertainCommit = undefined
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
